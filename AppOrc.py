@@ -64,27 +64,28 @@ def conectar_google():
         diretorio_atual = os.path.dirname(os.path.abspath(__file__))
         caminho_json = os.path.join(diretorio_atual, 'credentials.json')
 
-        # 1. Tenta carregar o arquivo local (Para uso no VS Code)
+        # 1. Tenta carregar o arquivo local (VS Code)
         if os.path.exists(caminho_json):
             return gspread.service_account(filename=caminho_json)
         
-        # 2. Se não houver arquivo, tenta usar os Secrets (Para uso na Web)
+        # 2. Se não houver arquivo, usa os Secrets (Streamlit Cloud)
         elif "google_credentials" in st.secrets:
-            # O Streamlit às vezes entrega um AttrDict (objeto), 
-            # por isso checamos se precisamos converter para dicionário comum
             creds_data = st.secrets["google_credentials"]["content"]
             
             if isinstance(creds_data, str):
-                # Se for string, transforma em dicionário
                 creds_dict = json.loads(creds_data)
             else:
-                # Se já for um objeto/dicionário (AttrDict), converte para dict puro
                 creds_dict = dict(creds_data)
+            
+            # --- CURA PARA O ERRO DE PEM ---
+            # Remove escapes extras e garante que os \n sejam interpretados como quebras de linha reais
+            if "private_key" in creds_dict:
+                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
                 
             return gspread.service_account_from_dict(creds_dict)
             
         else:
-            st.error("❌ Credenciais não encontradas. Verifique o arquivo local ou os Secrets.")
+            st.error("❌ Credenciais não encontradas.")
             return None
     except Exception as e:
         st.error(f"❌ Erro de conexão detalhado: {e}")
@@ -522,4 +523,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
