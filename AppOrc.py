@@ -64,16 +64,30 @@ def conectar_google():
         diretorio_atual = os.path.dirname(os.path.abspath(__file__))
         caminho_json = os.path.join(diretorio_atual, 'credentials.json')
 
+        # 1. Tenta carregar o arquivo local (Para uso no VS Code)
         if os.path.exists(caminho_json):
             return gspread.service_account(filename=caminho_json)
+        
+        # 2. Se não houver arquivo, tenta usar os Secrets (Para uso na Web)
         elif "google_credentials" in st.secrets:
-            creds = json.loads(st.secrets["google_credentials"])
-            return gspread.service_account_from_dict(creds)
+            # O Streamlit às vezes entrega um AttrDict (objeto), 
+            # por isso checamos se precisamos converter para dicionário comum
+            creds_data = st.secrets["google_credentials"]["content"]
+            
+            if isinstance(creds_data, str):
+                # Se for string, transforma em dicionário
+                creds_dict = json.loads(creds_data)
+            else:
+                # Se já for um objeto/dicionário (AttrDict), converte para dict puro
+                creds_dict = dict(creds_data)
+                
+            return gspread.service_account_from_dict(creds_dict)
+            
         else:
-            st.error("❌ Arquivo 'credentials.json' não encontrado.")
+            st.error("❌ Credenciais não encontradas. Verifique o arquivo local ou os Secrets.")
             return None
     except Exception as e:
-        st.error(f"❌ Erro de conexão: {e}")
+        st.error(f"❌ Erro de conexão detalhado: {e}")
         return None
 
 def get_worksheet_case_insensitive(sh, nome_procurado):
@@ -508,3 +522,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
