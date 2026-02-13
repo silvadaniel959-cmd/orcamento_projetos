@@ -61,31 +61,34 @@ MESES_PT = {
 # --- 4. CONEXÃO ---
 def conectar_google():
     try:
+        # Tenta local primeiro (VS Code)
         diretorio_atual = os.path.dirname(os.path.abspath(__file__))
         caminho_json = os.path.join(diretorio_atual, 'credentials.json')
 
-        # 1. Tenta carregar o arquivo local (VS Code)
         if os.path.exists(caminho_json):
             return gspread.service_account(filename=caminho_json)
         
-        # 2. Se não houver arquivo, usa os Secrets (Streamlit Cloud)
+        # Se não houver arquivo, usa os Secrets (Streamlit Cloud)
         elif "google_credentials" in st.secrets:
+            # Pega o conteúdo do campo 'content' que você colou
             creds_data = st.secrets["google_credentials"]["content"]
             
+            # Se o Streamlit entregar como texto, transforma em dicionário
             if isinstance(creds_data, str):
                 creds_dict = json.loads(creds_data)
             else:
+                # Se já vier como objeto, converte para dicionário puro
                 creds_dict = dict(creds_data)
             
             # --- CURA PARA O ERRO DE PEM ---
-            # Remove escapes extras e garante que os \n sejam interpretados como quebras de linha reais
+            # Garante que as quebras de linha da chave privada sejam reais
             if "private_key" in creds_dict:
                 creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
                 
             return gspread.service_account_from_dict(creds_dict)
             
         else:
-            st.error("❌ Credenciais não encontradas.")
+            st.error("❌ Credenciais não encontradas nos Segredos ou localmente.")
             return None
     except Exception as e:
         st.error(f"❌ Erro de conexão detalhado: {e}")
@@ -523,5 +526,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
