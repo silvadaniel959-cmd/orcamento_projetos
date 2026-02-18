@@ -1,5 +1,3 @@
-1) AppOrc.py (SUBSTITUA o seu inteiro por este)
-
 import socket
 from datetime import datetime
 
@@ -320,4 +318,5 @@ st.download_button(
 
 st.markdown("---")
 st.caption("Se aparecer 503 /script-health-check no Cloud, normalmente é travamento em rede/secrets. Esta versão força timeout e mostra o erro real.")
+
 
