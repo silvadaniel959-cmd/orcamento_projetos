@@ -432,10 +432,27 @@ def carregar_dados():
         else:
             df_cad = pd.DataFrame(columns=["Tipo", "Nome"])
 
-        return df_lanc, df_cad
+        # Carregar aba de envolvidos por projeto/mês
+        ws_env = get_worksheet(sh, "envolvidos")
+        if ws_env:
+            dados_env = ws_env.get_all_values()
+            cols_env = ["Ano", "Mês", "Projeto", "Nome", "Cargo/Função", "Centro de Custo", "Horas", "Observações"]
+            if len(dados_env) > 1:
+                linhas_env = []
+                for l in dados_env[1:]:
+                    if len(l) < len(cols_env):
+                        l += [""] * (len(cols_env) - len(l))
+                    linhas_env.append(l[:len(cols_env)])
+                df_env = pd.DataFrame(linhas_env, columns=cols_env)
+            else:
+                df_env = pd.DataFrame(columns=cols_env)
+        else:
+            df_env = pd.DataFrame(columns=["Ano", "Mês", "Projeto", "Nome", "Cargo/Função", "Centro de Custo", "Horas", "Observações"])
+
+        return df_lanc, df_cad, df_env
     except Exception as e:
         st.error(f"Erro ao carregar dados: {e}")
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -467,6 +484,41 @@ def excluir_linhas_google(lista_ids):
             if ws:
                 for row_id in sorted(lista_ids, reverse=True):
                     ws.delete_rows(int(row_id))
+                st.cache_data.clear()
+                return True
+        except Exception as e:
+            st.error(f"Erro ao excluir: {e}")
+    return False
+
+
+def salvar_envolvido(dados_linha):
+    """Salva um envolvido na aba 'envolvidos' do Google Sheets."""
+    client = conectar_google()
+    if client:
+        try:
+            sh = client.open("dados_app_orcamento")
+            ws = get_worksheet(sh, "envolvidos")
+            if not ws:
+                ws = sh.add_worksheet(title="envolvidos", rows=500, cols=8)
+                ws.append_row(["Ano", "Mês", "Projeto", "Nome", "Cargo/Função", "Centro de Custo", "Horas", "Observações"])
+            ws.append_row(dados_linha, value_input_option='USER_ENTERED')
+            st.cache_data.clear()
+            return True
+        except Exception as e:
+            st.error(f"Erro ao salvar envolvido: {e}")
+    return False
+
+
+def excluir_envolvido_google(ws_name, row_indices):
+    """Exclui linhas da aba envolvidos (de baixo para cima)."""
+    client = conectar_google()
+    if client:
+        try:
+            sh = client.open("dados_app_orcamento")
+            ws = get_worksheet(sh, ws_name)
+            if ws:
+                for idx in sorted(row_indices, reverse=True):
+                    ws.delete_rows(int(idx))
                 st.cache_data.clear()
                 return True
         except Exception as e:
@@ -675,12 +727,8 @@ def tela_resumo(df):
         rows_html = ""
         for _, row in df_proj.iterrows():
             rows_html += render_progress_row(row['Projeto'], row['Realizado'], row['Orçado'])
-        st.markdown(f"""
-        <div style="background:#FFFFFF; border:1px solid #F0F0F0; border-radius:14px;
-             padding:6px 20px; box-shadow:0 1px 4px rgba(0,0,0,0.04); margin-bottom:20px;">
-          {rows_html}
-        </div>
-        """, unsafe_allow_html=True)
+        html_proj = f'<div style="background:#FFFFFF;border:1px solid #F0F0F0;border-radius:14px;padding:6px 20px;box-shadow:0 1px 4px rgba(0,0,0,0.04);margin-bottom:20px;">{rows_html}</div>'
+        st.markdown(html_proj, unsafe_allow_html=True)
     else:
         st.info("Sem dados de projetos para exibir.")
 
@@ -697,12 +745,8 @@ def tela_resumo(df):
         rows_html = ""
         for _, row in df_cat.iterrows():
             rows_html += render_progress_row(row['Categoria'], row['Realizado'], row['Orçado'])
-        st.markdown(f"""
-        <div style="background:#FFFFFF; border:1px solid #F0F0F0; border-radius:14px;
-             padding:6px 20px; box-shadow:0 1px 4px rgba(0,0,0,0.04); margin-bottom:20px;">
-          {rows_html}
-        </div>
-        """, unsafe_allow_html=True)
+        html_cat = f'<div style="background:#FFFFFF;border:1px solid #F0F0F0;border-radius:14px;padding:6px 20px;box-shadow:0 1px 4px rgba(0,0,0,0.04);margin-bottom:20px;">{rows_html}</div>'
+        st.markdown(html_cat, unsafe_allow_html=True)
     else:
         st.info("Sem dados de categorias para exibir.")
 
@@ -965,10 +1009,11 @@ def tela_dados(df):
                         st.rerun()
 
 
-def tela_cadastros(df_cad):
-    """Tela de gerenciamento de projetos e categorias."""
-    st.markdown("<h1>Cadastros</h1><p style='color:#8E8E93; margin-top:-8px; margin-bottom:20px;'>Gerencie projetos e categorias do sistema</p>", unsafe_allow_html=True)
+def tela_cadastros(df_cad, df_env):
+    """Tela de gerenciamento de projetos, categorias e envolvidos."""
+    st.markdown("<h1>Cadastros</h1><p style='color:#8E8E93; margin-top:-8px; margin-bottom:20px;'>Gerencie projetos, categorias e equipes do sistema</p>", unsafe_allow_html=True)
 
+    # ── Projetos e Categorias ──
     c1, c2 = st.columns(2, gap="medium")
 
     with c1:
@@ -1007,6 +1052,94 @@ def tela_cadastros(df_cad):
                 st.caption(f"{len(cat_lista)} categoria(s) cadastrada(s)")
                 st.dataframe(cat_lista, use_container_width=True, hide_index=True)
 
+    st.markdown("<hr>", unsafe_allow_html=True)
+
+    # ── Envolvidos por Projeto / Mês ──
+    render_section_title("👥 Envolvidos por Projeto / Mês")
+    st.markdown("<p style='color:#8E8E93; font-size:13px; margin-top:-4px; margin-bottom:16px;'>Cadastre as pessoas alocadas em cada projeto por mês para apuração de centro de custo e mão de obra.</p>", unsafe_allow_html=True)
+
+    # Lista de projetos disponíveis
+    if not df_cad.empty:
+        lista_proj = sorted(df_cad[df_cad['Tipo'] == 'Projeto']['Nome'].unique().tolist())
+    else:
+        lista_proj = []
+
+    ano_atual = date.today().year
+    meses_opcoes = [f"{m:02d} - {MESES_PT[m]}" for m in range(1, 13)]
+
+    with st.form("form_envolvido", clear_on_submit=True):
+        ce1, ce2, ce3 = st.columns(3)
+        env_ano = ce1.selectbox("📅 Ano", [ano_atual - 1, ano_atual, ano_atual + 1], index=1)
+        env_mes = ce2.selectbox("🗓️ Mês", meses_opcoes)
+        env_proj = ce3.selectbox("🏢 Projeto", lista_proj, index=None, placeholder="Selecione...")
+
+        ce4, ce5, ce6 = st.columns(3)
+        env_nome = ce4.text_input("👤 Nome do Envolvido", placeholder="Ex: João Silva")
+        env_cargo = ce5.text_input("💼 Cargo / Função", placeholder="Ex: Analista de TI")
+        env_cc = ce6.text_input("🏦 Centro de Custo", placeholder="Ex: TI-001")
+
+        ce7, ce8 = st.columns(2)
+        env_horas = ce7.number_input("⏰ Horas Dedicadas", min_value=0.0, step=1.0, format="%.1f",
+                                     help="Total de horas dedicadas ao projeto neste mês")
+        env_obs = ce8.text_input("📝 Observações", placeholder="Opcional")
+
+        if st.form_submit_button("💾 Cadastrar Envolvido", type="primary", use_container_width=True):
+            if not env_nome.strip():
+                st.error("Informe o nome do envolvido.")
+            elif env_proj is None:
+                st.error("Selecione um projeto.")
+            else:
+                linha = [str(env_ano), env_mes, env_proj, env_nome.strip(),
+                         env_cargo.strip(), env_cc.strip(), str(env_horas), env_obs.strip()]
+                with st.spinner("Salvando envolvido..."):
+                    if salvar_envolvido(linha):
+                        st.toast(f"{env_nome} cadastrado em {env_proj} ({env_mes})!", icon="✅")
+                        st.balloons()
+
+    # ── Tabela de envolvidos cadastrados ──
+    if not df_env.empty:
+        render_section_title("Envolvidos Cadastrados")
+
+        # Filtros rápidos
+        fe1, fe2, fe3 = st.columns(3)
+        filtro_env_ano = fe1.selectbox("Filtrar Ano", sorted(df_env['Ano'].unique(), reverse=True),
+                                       index=0, key="filtro_env_ano")
+        df_env_f = df_env[df_env['Ano'] == str(filtro_env_ano)]
+
+        meses_env_disp = sorted(df_env_f['Mês'].unique()) if not df_env_f.empty else []
+        filtro_env_mes = fe2.multiselect("Filtrar Mês", meses_env_disp, key="filtro_env_mes")
+        if filtro_env_mes:
+            df_env_f = df_env_f[df_env_f['Mês'].isin(filtro_env_mes)]
+
+        proj_env_disp = sorted(df_env_f['Projeto'].unique()) if not df_env_f.empty else []
+        filtro_env_proj = fe3.multiselect("Filtrar Projeto", proj_env_disp, key="filtro_env_proj")
+        if filtro_env_proj:
+            df_env_f = df_env_f[df_env_f['Projeto'].isin(filtro_env_proj)]
+
+        if not df_env_f.empty:
+            st.caption(f"{len(df_env_f)} registro(s) encontrado(s)")
+            st.dataframe(
+                df_env_f[["Mês", "Projeto", "Nome", "Cargo/Função", "Centro de Custo", "Horas", "Observações"]],
+                use_container_width=True, hide_index=True,
+                column_config={
+                    "Horas": st.column_config.NumberColumn("Horas", format="%.1f"),
+                }
+            )
+
+            # Resumo por Centro de Custo
+            df_env_f['Horas_num'] = pd.to_numeric(df_env_f['Horas'], errors='coerce').fillna(0)
+            resumo_cc = df_env_f.groupby('Centro de Custo')['Horas_num'].sum().reset_index()
+            resumo_cc.columns = ['Centro de Custo', 'Total Horas']
+            resumo_cc = resumo_cc.sort_values('Total Horas', ascending=False)
+            if not resumo_cc.empty:
+                render_section_title("Resumo por Centro de Custo")
+                st.dataframe(resumo_cc, use_container_width=True, hide_index=True,
+                             column_config={"Total Horas": st.column_config.NumberColumn(format="%.1f")})
+        else:
+            st.info("Nenhum envolvido encontrado para os filtros selecionados.")
+    else:
+        st.info("Nenhum envolvido cadastrado ainda. Use o formulário acima para começar.")
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 7. MENU PRINCIPAL — BOTÕES NA SIDEBAR
@@ -1019,7 +1152,7 @@ def main():
         st.session_state.pagina = "painel"
 
     with st.spinner("Carregando dados..."):
-        df_lancamentos, df_cadastros = carregar_dados()
+        df_lancamentos, df_cadastros, df_envolvidos = carregar_dados()
 
     # ── Sidebar com botões ──
     with st.sidebar:
@@ -1131,7 +1264,7 @@ def main():
     elif st.session_state.pagina == "dados":
         tela_dados(df_lancamentos)
     elif st.session_state.pagina == "cadastros":
-        tela_cadastros(df_cadastros)
+        tela_cadastros(df_cadastros, df_envolvidos)
 
 
 if __name__ == "__main__":
