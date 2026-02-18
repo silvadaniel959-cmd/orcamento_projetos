@@ -631,25 +631,7 @@ def render_progress_row(nome, consumido, orcado):
     saldo = orcado - consumido
     saldo_cor = CORES['realizado'] if saldo >= 0 else CORES['alerta']
 
-    return f"""
-    <div style="padding:14px 0; border-bottom:1px solid #F5F5F5;">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; flex-wrap:wrap; gap:4px;">
-        <span style="font-size:14px; font-weight:600; color:#1C1C1E;">{nome}</span>
-        <div style="display:flex; align-items:center; gap:10px;">
-          <span style="font-size:12px; color:#8E8E93;">{fmt_real(consumido)} / {fmt_real(orcado)}</span>
-          <span style="background:{cor_bg}; color:{cor}; padding:2px 10px; border-radius:6px;
-                font-size:12px; font-weight:700;">{p:.0f}%</span>
-        </div>
-      </div>
-      <div style="background:#F5F5F5; border-radius:4px; height:6px; width:100%; overflow:hidden;">
-        <div style="background:{cor}; width:{min(p,100):.0f}%; height:6px; border-radius:4px;
-             transition:width 0.8s cubic-bezier(0.4,0,0.2,1);"></div>
-      </div>
-      <div style="display:flex; justify-content:flex-end; margin-top:4px;">
-        <span style="font-size:11px; color:{saldo_cor}; font-weight:500;">Saldo: {fmt_real(saldo)}</span>
-      </div>
-    </div>
-    """
+    return f'<div style="padding:14px 0;border-bottom:1px solid #F5F5F5;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px;"><span style="font-size:14px;font-weight:600;color:#1C1C1E;">{nome}</span><div style="display:flex;align-items:center;gap:10px;"><span style="font-size:12px;color:#8E8E93;">{fmt_real(consumido)} / {fmt_real(orcado)}</span><span style="background:{cor_bg};color:{cor};padding:2px 10px;border-radius:6px;font-size:12px;font-weight:700;">{p:.0f}%</span></div></div><div style="background:#F5F5F5;border-radius:4px;height:6px;width:100%;overflow:hidden;"><div style="background:{cor};width:{min(p,100):.0f}%;height:6px;border-radius:4px;transition:width 0.8s cubic-bezier(0.4,0,0.2,1);"></div></div><div style="display:flex;justify-content:flex-end;margin-top:4px;"><span style="font-size:11px;color:{saldo_cor};font-weight:500;">Saldo: {fmt_real(saldo)}</span></div></div>'
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
