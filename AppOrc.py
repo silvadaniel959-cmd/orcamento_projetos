@@ -524,8 +524,8 @@ def render_section_title(title):
     """, unsafe_allow_html=True)
 
 
-def render_progress_bar(consumido, orcado):
-    """Barra de progresso de consumo orçamentário."""
+def render_progress_bar(consumido, orcado, label=None):
+    """Barra de progresso de consumo orçamentário (card grande)."""
     p = min(pct(consumido, orcado), 120)
     if p <= 70:
         cor = CORES["realizado"]
@@ -537,9 +537,12 @@ def render_progress_bar(consumido, orcado):
         cor = CORES["alerta"]
         cor_bg = "rgba(255,59,48,0.12)"
 
+    label_html = f'<div style="font-size:14px; font-weight:600; color:#1C1C1E; margin-bottom:10px;">{label}</div>' if label else ''
+
     st.markdown(f"""
     <div style="background:#FFFFFF; border:1px solid #F0F0F0; border-radius:14px;
          padding:18px 20px; box-shadow:0 1px 4px rgba(0,0,0,0.04); margin-bottom:20px;">
+      {label_html}
       <div style="display:flex; justify-content:space-between; align-items:center;
            margin-bottom:10px; flex-wrap:wrap; gap:4px;">
         <span style="font-size:13px; font-weight:500; color:#3A3A3C;">
@@ -558,6 +561,43 @@ def render_progress_bar(consumido, orcado):
       </div>
     </div>
     """, unsafe_allow_html=True)
+
+
+def render_progress_row(nome, consumido, orcado):
+    """Barra de progresso compacta para listas de projeto/categoria."""
+    p = min(pct(consumido, orcado), 120)
+    if p <= 70:
+        cor = CORES["realizado"]
+        cor_bg = "rgba(52,199,89,0.12)"
+    elif p <= 100:
+        cor = CORES["aviso"]
+        cor_bg = "rgba(255,149,0,0.12)"
+    else:
+        cor = CORES["alerta"]
+        cor_bg = "rgba(255,59,48,0.12)"
+
+    saldo = orcado - consumido
+    saldo_cor = CORES['realizado'] if saldo >= 0 else CORES['alerta']
+
+    return f"""
+    <div style="padding:14px 0; border-bottom:1px solid #F5F5F5;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; flex-wrap:wrap; gap:4px;">
+        <span style="font-size:14px; font-weight:600; color:#1C1C1E;">{nome}</span>
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span style="font-size:12px; color:#8E8E93;">{fmt_real(consumido)} / {fmt_real(orcado)}</span>
+          <span style="background:{cor_bg}; color:{cor}; padding:2px 10px; border-radius:6px;
+                font-size:12px; font-weight:700;">{p:.0f}%</span>
+        </div>
+      </div>
+      <div style="background:#F5F5F5; border-radius:4px; height:6px; width:100%; overflow:hidden;">
+        <div style="background:{cor}; width:{min(p,100):.0f}%; height:6px; border-radius:4px;
+             transition:width 0.8s cubic-bezier(0.4,0,0.2,1);"></div>
+      </div>
+      <div style="display:flex; justify-content:flex-end; margin-top:4px;">
+        <span style="font-size:11px; color:{saldo_cor}; font-weight:500;">Saldo: {fmt_real(saldo)}</span>
+      </div>
+    </div>
+    """
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -618,9 +658,53 @@ def tela_resumo(df):
 
     st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
-    # ── Barra de consumo ──
-    render_section_title("Consumo do Orçamento")
+    # ── Barra de consumo geral ──
+    render_section_title("Consumo do Orçamento · Geral")
     render_progress_bar(realizado, orcado)
+
+    # ── Consumo por Projeto ──
+    render_section_title("Consumo por Projeto")
+    df_proj = (df_f.groupby(['Projeto', 'Tipo'])['Valor'].sum()
+               .unstack(fill_value=0).reset_index())
+    if not df_proj.empty:
+        if 'Orçado' not in df_proj.columns:
+            df_proj['Orçado'] = 0.0
+        if 'Realizado' not in df_proj.columns:
+            df_proj['Realizado'] = 0.0
+        df_proj = df_proj.sort_values('Orçado', ascending=False)
+        rows_html = ""
+        for _, row in df_proj.iterrows():
+            rows_html += render_progress_row(row['Projeto'], row['Realizado'], row['Orçado'])
+        st.markdown(f"""
+        <div style="background:#FFFFFF; border:1px solid #F0F0F0; border-radius:14px;
+             padding:6px 20px; box-shadow:0 1px 4px rgba(0,0,0,0.04); margin-bottom:20px;">
+          {rows_html}
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.info("Sem dados de projetos para exibir.")
+
+    # ── Consumo por Categoria ──
+    render_section_title("Consumo por Categoria")
+    df_cat = (df_f.groupby(['Categoria', 'Tipo'])['Valor'].sum()
+              .unstack(fill_value=0).reset_index())
+    if not df_cat.empty:
+        if 'Orçado' not in df_cat.columns:
+            df_cat['Orçado'] = 0.0
+        if 'Realizado' not in df_cat.columns:
+            df_cat['Realizado'] = 0.0
+        df_cat = df_cat.sort_values('Orçado', ascending=False)
+        rows_html = ""
+        for _, row in df_cat.iterrows():
+            rows_html += render_progress_row(row['Categoria'], row['Realizado'], row['Orçado'])
+        st.markdown(f"""
+        <div style="background:#FFFFFF; border:1px solid #F0F0F0; border-radius:14px;
+             padding:6px 20px; box-shadow:0 1px 4px rgba(0,0,0,0.04); margin-bottom:20px;">
+          {rows_html}
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.info("Sem dados de categorias para exibir.")
 
     # ── Gráfico: Evolução Mensal ──
     render_section_title("Evolução Mensal")
@@ -644,62 +728,6 @@ def tela_resumo(df):
         st.plotly_chart(fig_mes, use_container_width=True, config=PLOTLY_CONFIG)
     else:
         st.info("Sem dados mensais para exibir.")
-
-    # ── Gráficos lado a lado ──
-    col_g1, col_g2 = st.columns(2, gap="medium")
-
-    with col_g1:
-        render_section_title("Projetos · Orçado vs Realizado")
-        df_proj = (df_f.groupby(['Projeto', 'Tipo'])['Valor'].sum()
-                   .unstack(fill_value=0).reset_index())
-        if not df_proj.empty:
-            if 'Orçado' not in df_proj.columns:
-                df_proj['Orçado'] = 0.0
-            if 'Realizado' not in df_proj.columns:
-                df_proj['Realizado'] = 0.0
-            fig_proj = go.Figure()
-            fig_proj.add_trace(go.Bar(
-                x=df_proj['Projeto'], y=df_proj['Orçado'],
-                name='Orçado', marker_color=CORES['orcado'], opacity=0.55, width=0.55,
-                hovertemplate="<b>%{x}</b><br>Orçado: R$ %{y:,.2f}<extra></extra>"
-            ))
-            fig_proj.add_trace(go.Bar(
-                x=df_proj['Projeto'], y=df_proj['Realizado'],
-                name='Realizado', marker_color=CORES['primaria'], width=0.28,
-                hovertemplate="<b>%{x}</b><br>Realizado: R$ %{y:,.2f}<extra></extra>"
-            ))
-            fig_proj.update_layout(barmode='overlay', height=360, **PLOTLY_LAYOUT)
-            st.plotly_chart(fig_proj, use_container_width=True, config=PLOTLY_CONFIG)
-
-    with col_g2:
-        render_section_title("Categorias · Top 10 (Bullet)")
-        df_cat = (df_f.groupby(['Categoria', 'Tipo'])['Valor'].sum()
-                  .unstack(fill_value=0).reset_index())
-        if not df_cat.empty:
-            if 'Orçado' not in df_cat.columns:
-                df_cat['Orçado'] = 0.0
-            if 'Realizado' not in df_cat.columns:
-                df_cat['Realizado'] = 0.0
-            df_cat = df_cat.sort_values('Orçado', ascending=True).tail(10)
-            fig_bullet = go.Figure()
-            fig_bullet.add_trace(go.Bar(
-                y=df_cat['Categoria'], x=df_cat['Orçado'],
-                name='Meta', orientation='h', marker_color='#E5E7EB', width=0.65,
-                hovertemplate="<b>%{y}</b><br>Meta: R$ %{x:,.2f}<extra></extra>"
-            ))
-            fig_bullet.add_trace(go.Bar(
-                y=df_cat['Categoria'], x=df_cat['Realizado'],
-                name='Realizado', orientation='h', marker_color=CORES['realizado'], width=0.3,
-                hovertemplate="<b>%{y}</b><br>Realizado: R$ %{x:,.2f}<extra></extra>"
-            ))
-            fig_bullet.add_trace(go.Scatter(
-                y=df_cat['Categoria'], x=df_cat['Orçado'],
-                mode='markers', name='Limite',
-                marker=dict(symbol='line-ns-open', size=22, color=CORES['texto'], line=dict(width=2.5)),
-                hovertemplate="<b>%{y}</b><br>Limite: R$ %{x:,.2f}<extra></extra>"
-            ))
-            fig_bullet.update_layout(barmode='overlay', height=360, **PLOTLY_LAYOUT)
-            st.plotly_chart(fig_bullet, use_container_width=True, config=PLOTLY_CONFIG)
 
     # ── Waterfall ──
     render_section_title("Fluxo de Caixa · Waterfall")
