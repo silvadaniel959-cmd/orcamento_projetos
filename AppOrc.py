@@ -1,28 +1,23 @@
 """
-Controle Orçamentário v6.0
-==========================
-Aplicação Streamlit para gestão de orçamentos com integração Google Sheets.
-Responsivo para Desktop, iPad e iPhone.
-KPIs via st.metric | Menu lateral com botões | Fundo branco.
+Controle Orçamentário v6.1 (revisado)
+====================================
+Streamlit + Google Sheets
 
-Melhorias implementadas (a partir das sugestões):
-- Corrige retorno inconsistente de carregar_dados (sempre 3 DataFrames)
-- Ordenação correta de meses (cronológica)
-- Normalização de campos (strip/padronização)
-- Ano derivado da Data quando possível (evita mascarar erro)
-- Conversão de moeda mais eficiente (vectorizada + robusta)
-- UUID por lançamento (Lanc_ID) e ID de grupo (Grupo_ID) para parcelamentos
-- Exclusão segura por UUID (não depende de índice de linha)
-- Exclusão em lote via batch_update (melhor performance e menos rate-limit)
-- Cache buster em session_state (evita st.cache_data.clear() “canhão”)
-- Cálculo Orçado vs Realizado mais correto:
-    - Preferencialmente por vínculo (Orcado_Vinculo) quando informado
-    - Fallback por agrupamento (Ano/Mês/Projeto/Categoria) quando não há vínculo
-- Download CSV da base filtrada
-- Alertas e regras (Realizado sem Orçado, estouros, etc.)
-- Log simples de ações em aba "logs" (append)
-- Sidebar por padrão expandida (melhor para mobile)
-- Remove balloons; usa toast/success
+Correções e melhorias incluídas:
+- carregar_dados SEMPRE retorna 3 DataFrames (corrige unpack)
+- Ordenação cronológica de meses (Mes_Num)
+- Conversão de moeda robusta e mais eficiente (vectorizada)
+- Normalização de textos e Tipo
+- Ano derivado da Data quando possível (e flag Ano_Invalido)
+- IDs: Lanc_ID (UUID por linha), Grupo_ID (parcelamento), Orcado_Vinculo (Realizado -> Orçado)
+- Exclusão segura por Lanc_ID (não depende de índice de linha)
+- Exclusão em lote via batch_update (menos rate-limit)
+- Cache buster granular (sem st.cache_data.clear())
+- Tela "Orçamentos (agregado)" com cálculo correto e sem KeyError:
+  * Mes_Num garantido no agregado
+  * sort_values aplicado no DataFrame que contém Mes_Num
+- Download CSV com filtro aplicado
+- Log simples em aba "logs"
 """
 
 import streamlit as st
@@ -37,7 +32,7 @@ import os
 import math
 import numpy as np
 import uuid
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -47,8 +42,9 @@ st.set_page_config(
     page_title="Controle Orçamentário",
     page_icon="🎯",
     layout="wide",
-    initial_sidebar_state="expanded",  # melhor UX (principalmente mobile)
+    initial_sidebar_state="expanded",
 )
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 2. CSS — FUNDO BRANCO, BOTÕES AZUIS, RESPONSIVO
@@ -254,6 +250,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 3. CONSTANTES / SCHEMA
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -263,53 +260,29 @@ CORES = {
     "realizado": "#34C759",
     "alerta": "#FF3B30",
     "aviso": "#FF9500",
-    "roxo": "#AF52DE",
     "texto": "#1C1C1E",
     "texto2": "#3A3A3C",
     "texto3": "#8E8E93",
 }
 
 MESES_PT = {
-    1: "JANEIRO",
-    2: "FEVEREIRO",
-    3: "MARÇO",
-    4: "ABRIL",
-    5: "MAIO",
-    6: "JUNHO",
-    7: "JULHO",
-    8: "AGOSTO",
-    9: "SETEMBRO",
-    10: "OUTUBRO",
-    11: "NOVEMBRO",
-    12: "DEZEMBRO",
+    1: "JANEIRO", 2: "FEVEREIRO", 3: "MARÇO", 4: "ABRIL",
+    5: "MAIO", 6: "JUNHO", 7: "JULHO", 8: "AGOSTO",
+    9: "SETEMBRO", 10: "OUTUBRO", 11: "NOVEMBRO", 12: "DEZEMBRO"
 }
 
 SHEET_NAME = "dados_app_orcamento"
 TAB_LANC = "lançamentos"
-TAB_LANC_FALLBACK = ["lancamentos", "Lancamentos", "LANÇAMENTOS", "Lançamentos", "Lancamentos"]
+TAB_LANC_FALLBACK = ["lancamentos", "Lancamentos", "LANÇAMENTOS", "Lançamentos"]
 TAB_CAD = "cadastros"
 TAB_ENV = "envolvidos"
 TAB_LOG = "logs"
 
-# Colunas do Google Sheets (lançamentos)
 COLS_LANC = [
-    "Data",               # dd/mm/YYYY
-    "Ano",                # int
-    "Mês",                # "02 - FEVEREIRO"
-    "Tipo",               # "Orçado" | "Realizado"
-    "Projeto",
-    "Categoria",
-    "Valor",              # moeda (string ou número; será convertido)
-    "Descrição",
-    "Parcela",
-    "Abatido",            # legado (mantido)
-    "Envolvidos",
-    "Info Gerais",
-    # novas:
-    "Lanc_ID",            # UUID único por linha
-    "Grupo_ID",           # UUID para agrupar parcelas do mesmo lançamento
-    "Orcado_Vinculo",     # UUID do orçamento ao qual um Realizado está vinculado (opcional)
-    "Criado_Em",          # timestamp
+    "Data", "Ano", "Mês", "Tipo", "Projeto", "Categoria",
+    "Valor", "Descrição", "Parcela", "Abatido",
+    "Envolvidos", "Info Gerais",
+    "Lanc_ID", "Grupo_ID", "Orcado_Vinculo", "Criado_Em"
 ]
 
 PLOTLY_LAYOUT = dict(
@@ -319,46 +292,25 @@ PLOTLY_LAYOUT = dict(
     plot_bgcolor="#FFFFFF",
     margin=dict(l=8, r=8, t=8, b=48),
     legend=dict(
-        orientation="h",
-        yanchor="bottom",
-        y=-0.22,
-        xanchor="center",
-        x=0.5,
+        orientation="h", yanchor="bottom", y=-0.22,
+        xanchor="center", x=0.5,
         bgcolor="rgba(0,0,0,0)",
-        font=dict(size=12, color="#8E8E93"),
+        font=dict(size=12, color="#8E8E93")
     ),
-    xaxis=dict(
-        showgrid=False,
-        showline=False,
-        tickfont=dict(size=11, color="#8E8E93"),
-        fixedrange=True,
-    ),
-    yaxis=dict(
-        showgrid=True,
-        gridcolor="#F5F5F5",
-        gridwidth=1,
-        showline=False,
-        tickfont=dict(size=11, color="#8E8E93"),
-        fixedrange=True,
-    ),
-    hoverlabel=dict(
-        bgcolor="white",
-        bordercolor="#E5E5EA",
-        font_size=13,
-        font_color="#1C1C1E",
-    ),
+    xaxis=dict(showgrid=False, showline=False,
+               tickfont=dict(size=11, color="#8E8E93"), fixedrange=True),
+    yaxis=dict(showgrid=True, gridcolor="#F5F5F5", gridwidth=1,
+               showline=False, tickfont=dict(size=11, color="#8E8E93"), fixedrange=True),
+    hoverlabel=dict(bgcolor="white", bordercolor="#E5E5EA",
+                    font_size=13, font_color="#1C1C1E"),
     dragmode=False,
 )
 
 PLOTLY_CONFIG = {
-    "displayModeBar": False,
-    "scrollZoom": False,
-    "doubleClick": False,
-    "showTips": False,
-    "responsive": True,
+    "displayModeBar": False, "scrollZoom": False,
+    "doubleClick": False, "showTips": False, "responsive": True,
 }
 
-# Alertas
 THRESH_OK = 70
 THRESH_WARN = 85
 THRESH_MAX = 100
@@ -379,9 +331,9 @@ def mes_str_from_date(d: date) -> str:
     return f"{d.month:02d} - {MESES_PT[d.month]}"
 
 
-def mes_num(mes_str: str) -> int:
+def mes_num(m: str) -> int:
     try:
-        return int(str(mes_str).split(" - ")[0])
+        return int(str(m).split(" - ")[0])
     except Exception:
         return 0
 
@@ -429,11 +381,7 @@ def render_progress_bar(consumido, orcado, label=None):
         cor = CORES["alerta"]
         cor_bg = "rgba(255,59,48,0.12)"
 
-    label_html = (
-        f'<div style="font-size:14px; font-weight:600; color:#1C1C1E; margin-bottom:10px;">{label}</div>'
-        if label
-        else ""
-    )
+    label_html = f'<div style="font-size:14px; font-weight:600; color:#1C1C1E; margin-bottom:10px;">{label}</div>' if label else ""
 
     st.markdown(
         f"""
@@ -449,8 +397,7 @@ def render_progress_bar(consumido, orcado, label=None):
               font-size:13px; font-weight:700;">{p:.0f}%</span>
       </div>
       <div style="background:#F5F5F5; border-radius:6px; height:8px; width:100%; overflow:hidden;">
-        <div style="background:{cor}; width:{min(p,100):.0f}%; height:8px; border-radius:6px;
-             transition:width 0.8s cubic-bezier(0.4,0,0.2,1);"></div>
+        <div style="background:{cor}; width:{min(p,100):.0f}%; height:8px; border-radius:6px;"></div>
       </div>
       <div style="display:flex; justify-content:space-between; margin-top:6px;">
         <span style="font-size:11px; color:#C7C7CC;">R$ 0</span>
@@ -477,7 +424,21 @@ def render_progress_row(nome, consumido, orcado):
     saldo = float(orcado) - float(consumido)
     saldo_cor = CORES["realizado"] if saldo >= 0 else CORES["alerta"]
 
-    return f'<div style="padding:14px 0;border-bottom:1px solid #F5F5F5;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px;"><span style="font-size:14px;font-weight:600;color:#1C1C1E;">{nome}</span><div style="display:flex;align-items:center;gap:10px;"><span style="font-size:12px;color:#8E8E93;">{fmt_real(consumido)} / {fmt_real(orcado)}</span><span style="background:{cor_bg};color:{cor};padding:2px 10px;border-radius:6px;font-size:12px;font-weight:700;">{p:.0f}%</span></div></div><div style="background:#F5F5F5;border-radius:4px;height:6px;width:100%;overflow:hidden;"><div style="background:{cor};width:{min(p,100):.0f}%;height:6px;border-radius:4px;transition:width 0.8s cubic-bezier(0.4,0,0.2,1);"></div></div><div style="display:flex;justify-content:flex-end;margin-top:4px;"><span style="font-size:11px;color:{saldo_cor};font-weight:500;">Saldo: {fmt_real(saldo)}</span></div></div>'
+    return (
+        f'<div style="padding:14px 0;border-bottom:1px solid #F5F5F5;">'
+        f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px;">'
+        f'<span style="font-size:14px;font-weight:600;color:#1C1C1E;">{nome}</span>'
+        f'<div style="display:flex;align-items:center;gap:10px;">'
+        f'<span style="font-size:12px;color:#8E8E93;">{fmt_real(consumido)} / {fmt_real(orcado)}</span>'
+        f'<span style="background:{cor_bg};color:{cor};padding:2px 10px;border-radius:6px;font-size:12px;font-weight:700;">{p:.0f}%</span>'
+        f"</div></div>"
+        f'<div style="background:#F5F5F5;border-radius:4px;height:6px;width:100%;overflow:hidden;">'
+        f'<div style="background:{cor};width:{min(p,100):.0f}%;height:6px;border-radius:4px;"></div>'
+        f"</div>"
+        f'<div style="display:flex;justify-content:flex-end;margin-top:4px;">'
+        f'<span style="font-size:11px;color:{saldo_cor};font-weight:500;">Saldo: {fmt_real(saldo)}</span>'
+        f"</div></div>"
+    )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -485,7 +446,6 @@ def render_progress_row(nome, consumido, orcado):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 @st.cache_resource(ttl=300)
 def conectar_google():
-    """Conexão com Google Sheets via Service Account. Cache por 5 min."""
     try:
         diretorio_atual = os.path.dirname(os.path.abspath(__file__))
         caminho_json = os.path.join(diretorio_atual, "credentials.json")
@@ -513,7 +473,6 @@ def get_worksheet_case_insensitive(sh, nome: str):
 
 
 def get_ws_lanc(sh):
-    # tenta título principal e alguns fallbacks sem acento
     ws = get_worksheet_case_insensitive(sh, TAB_LANC)
     if ws:
         return ws
@@ -534,47 +493,6 @@ def get_or_create_worksheet(sh, title: str, rows: int, cols: int, header: Option
     return ws
 
 
-def ensure_schema_lanc(ws):
-    """
-    Garante que a aba de lançamentos tenha todas as colunas do COLS_LANC.
-    Se faltar, atualiza o header e adiciona colunas vazias nas linhas existentes.
-    """
-    values = ws.get_all_values()
-    if not values:
-        ws.append_row(COLS_LANC, value_input_option="USER_ENTERED")
-        return
-
-    header = values[0]
-    header_norm = [h.strip() for h in header]
-    missing = [c for c in COLS_LANC if c not in header_norm]
-
-    if not missing:
-        return
-
-    # Novo header = header atual + missing (no fim)
-    new_header = header_norm + missing
-    ws.update("1:1", [new_header])
-
-    # Se houver linhas existentes, estende cada linha com strings vazias
-    n_rows = len(values) - 1
-    if n_rows <= 0:
-        return
-
-    # range de atualização (A2 : última_coluna última_linha)
-    total_cols = len(new_header)
-    start_row = 2
-    end_row = n_rows + 1
-    # Busca todas as linhas existentes e preenche
-    body = values[1:]
-    padded = []
-    for row in body:
-        r = row + [""] * (total_cols - len(row))
-        padded.append(r[:total_cols])
-
-    # Atualiza de uma vez
-    ws.update(f"A{start_row}:{gspread.utils.rowcol_to_a1(end_row, total_cols)}", padded)
-
-
 def ensure_schema_simple(ws, header: List[str]):
     values = ws.get_all_values()
     if not values:
@@ -582,18 +500,49 @@ def ensure_schema_simple(ws, header: List[str]):
         return
     existing = [c.strip() for c in values[0]]
     if existing != header:
-        # tentativa conservadora: se cabe, atualiza apenas o header para o esperado
         ws.update("1:1", [header])
 
 
+def ensure_schema_lanc(ws):
+    values = ws.get_all_values()
+    if not values:
+        ws.append_row(COLS_LANC, value_input_option="USER_ENTERED")
+        return
+
+    header = [h.strip() for h in values[0]]
+    missing = [c for c in COLS_LANC if c not in header]
+    if not missing:
+        return
+
+    new_header = header + missing
+    ws.update("1:1", [new_header])
+
+    n_rows = len(values) - 1
+    if n_rows <= 0:
+        return
+
+    total_cols = len(new_header)
+    body = values[1:]
+    padded = []
+    for row in body:
+        r = row + [""] * (total_cols - len(row))
+        padded.append(r[:total_cols])
+
+    start_row = 2
+    end_row = n_rows + 1
+    ws.update(
+        f"A{start_row}:{gspread.utils.rowcol_to_a1(end_row, total_cols)}",
+        padded
+    )
+
+
 def log_event(sh, action: str, detail: str, n: int = 0):
-    """Log simples em aba 'logs'."""
     try:
-        ws = get_or_create_worksheet(sh, TAB_LOG, rows=500, cols=5, header=["Timestamp", "Ação", "Detalhe", "Qtd", "Origem"])
+        ws = get_or_create_worksheet(sh, TAB_LOG, rows=500, cols=5,
+                                     header=["Timestamp", "Ação", "Detalhe", "Qtd", "Origem"])
         ensure_schema_simple(ws, ["Timestamp", "Ação", "Detalhe", "Qtd", "Origem"])
         ws.append_row([now_iso(), action, detail, str(n), "streamlit_app"], value_input_option="USER_ENTERED")
     except Exception:
-        # log não pode derrubar o app
         pass
 
 
@@ -601,34 +550,23 @@ def log_event(sh, action: str, detail: str, n: int = 0):
 # 6. DADOS — LOAD / CLEAN
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def moeda_to_float_series(s: pd.Series) -> pd.Series:
-    """
-    Conversão robusta e relativamente eficiente para BR:
-    - aceita "R$ 1.234,56", "1234,56", "1234.56", "1.234", etc.
-    """
     if s is None or len(s) == 0:
         return pd.Series([], dtype="float64")
 
     x = s.astype(str).fillna("").str.strip()
-    # tratar vazios
     x = x.replace({"": "0", "None": "0", "nan": "0", "NaN": "0"})
 
-    # remove R$ e espaços
     x = x.str.replace("R$", "", regex=False).str.replace(" ", "", regex=False)
 
-    # Se tiver "," (decimal BR), removemos "." (milhar) e trocamos "," por "."
     has_comma = x.str.contains(",", regex=False)
     x = x.where(~has_comma, x.str.replace(".", "", regex=False))
     x = x.where(~has_comma, x.str.replace(",", ".", regex=False))
 
-    # Se não tiver ",", pode ser "1234.56" (decimal US) ou "1.234" (milhar)
-    # Heurística: se tiver um único "." e 3 dígitos depois => milhar
     dot_count = x.str.count(r"\.")
     maybe_thousand = (dot_count == 1) & (x.str.split(".").str[-1].str.len() == 3)
     x = x.where(~maybe_thousand, x.str.replace(".", "", regex=False))
 
-    # Converte
-    out = pd.to_numeric(x, errors="coerce").fillna(0.0).astype(float)
-    return out
+    return pd.to_numeric(x, errors="coerce").fillna(0.0).astype(float)
 
 
 def normalize_text_cols(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
@@ -659,29 +597,21 @@ def normalize_tipo(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def derive_year_from_date(df: pd.DataFrame) -> pd.DataFrame:
-    if "Data" in df.columns:
-        df["Data_dt"] = pd.to_datetime(df["Data"], format="%d/%m/%Y", errors="coerce")
-    else:
-        df["Data_dt"] = pd.NaT
+    df["Data_dt"] = pd.to_datetime(df.get("Data", ""), format="%d/%m/%Y", errors="coerce")
 
     if "Ano" not in df.columns:
         df["Ano"] = np.nan
 
     ano_num = pd.to_numeric(df["Ano"], errors="coerce")
     ano_from_data = df["Data_dt"].dt.year
-
-    # se Ano inválido e Data válida => usa Data_dt.year
     ano_final = ano_num.where(~ano_num.isna(), ano_from_data)
 
-    # se ainda inválido => mantém NaN e depois seta ano atual só para não quebrar filtros,
-    # mas marcamos um flag para alertar
     df["Ano_Invalido"] = ano_final.isna()
     df["Ano"] = ano_final.fillna(date.today().year).astype(int)
     return df
 
 
 def ensure_month_consistency(df: pd.DataFrame) -> pd.DataFrame:
-    # se Mês vazio mas Data válida, calcula mês
     if "Mês" not in df.columns:
         df["Mês"] = ""
     mask = (df["Mês"].astype(str).str.strip() == "") & (df["Data_dt"].notna())
@@ -691,10 +621,6 @@ def ensure_month_consistency(df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(ttl=120, show_spinner=False)
 def carregar_dados(cache_buster: int) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Carrega lançamentos, cadastros e envolvidos do Google Sheets.
-    Cache por 2 min, invalidado via cache_buster.
-    """
     client = conectar_google()
     if not client:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -702,7 +628,6 @@ def carregar_dados(cache_buster: int) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Da
     try:
         sh = client.open(SHEET_NAME)
 
-        # lançamentos
         ws_lanc = get_ws_lanc(sh)
         if not ws_lanc:
             ws_lanc = get_or_create_worksheet(sh, TAB_LANC, rows=3000, cols=len(COLS_LANC), header=COLS_LANC)
@@ -713,34 +638,27 @@ def carregar_dados(cache_buster: int) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Da
         body = dados_lanc[1:] if len(dados_lanc) > 1 else []
         df_lanc = pd.DataFrame(body, columns=header) if body else pd.DataFrame(columns=header)
 
-        # schema garantido no header, mas df pode estar faltando colunas (por divergência)
         for c in COLS_LANC:
             if c not in df_lanc.columns:
                 df_lanc[c] = ""
 
-        # limpeza
-        df_lanc = normalize_text_cols(df_lanc, ["Projeto", "Categoria", "Descrição", "Envolvidos", "Info Gerais", "Parcela", "Abatido", "Lanc_ID", "Grupo_ID", "Orcado_Vinculo", "Criado_Em", "Mês"])
+        df_lanc = normalize_text_cols(df_lanc, [
+            "Projeto", "Categoria", "Descrição", "Envolvidos", "Info Gerais",
+            "Parcela", "Abatido", "Lanc_ID", "Grupo_ID", "Orcado_Vinculo", "Criado_Em", "Mês"
+        ])
         df_lanc = normalize_tipo(df_lanc)
 
-        # valores
         df_lanc["Valor_num"] = moeda_to_float_series(df_lanc["Valor"]) if "Valor" in df_lanc.columns else 0.0
 
-        # datas e ano
         df_lanc = derive_year_from_date(df_lanc)
         df_lanc = ensure_month_consistency(df_lanc)
 
-        # meses ordenáveis
         df_lanc["Mes_Num"] = df_lanc["Mês"].apply(mes_num)
 
-        # IDs: se faltar, preenche em memória (não grava automaticamente)
-        if "Lanc_ID" in df_lanc.columns:
-            df_lanc["Lanc_ID"] = df_lanc["Lanc_ID"].replace({"": np.nan})
-        df_lanc["Lanc_ID"] = df_lanc["Lanc_ID"].fillna(df_lanc.apply(lambda _: uuid4(), axis=1))
-
-        if "Grupo_ID" in df_lanc.columns:
-            df_lanc["Grupo_ID"] = df_lanc["Grupo_ID"].replace({"": np.nan}).fillna("")
-        if "Orcado_Vinculo" in df_lanc.columns:
-            df_lanc["Orcado_Vinculo"] = df_lanc["Orcado_Vinculo"].replace({"": np.nan}).fillna("")
+        # IDs em memória (novos já vão gravados; antigos podem estar vazios)
+        df_lanc["Lanc_ID"] = df_lanc["Lanc_ID"].replace({"": np.nan}).fillna(df_lanc.apply(lambda _: uuid4(), axis=1))
+        df_lanc["Grupo_ID"] = df_lanc["Grupo_ID"].replace({"": np.nan}).fillna("")
+        df_lanc["Orcado_Vinculo"] = df_lanc["Orcado_Vinculo"].replace({"": np.nan}).fillna("")
 
         # cadastros
         ws_cad = get_or_create_worksheet(sh, TAB_CAD, rows=200, cols=2, header=["Tipo", "Nome"])
@@ -750,7 +668,8 @@ def carregar_dados(cache_buster: int) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Da
         df_cad = normalize_text_cols(df_cad, ["Tipo", "Nome"])
 
         # envolvidos
-        ws_env = get_or_create_worksheet(sh, TAB_ENV, rows=1500, cols=8, header=["Ano", "Mês", "Projeto", "Nome", "Cargo/Função", "Centro de Custo", "Horas", "Observações"])
+        ws_env = get_or_create_worksheet(sh, TAB_ENV, rows=1500, cols=8,
+                                         header=["Ano", "Mês", "Projeto", "Nome", "Cargo/Função", "Centro de Custo", "Horas", "Observações"])
         ensure_schema_simple(ws_env, ["Ano", "Mês", "Projeto", "Nome", "Cargo/Função", "Centro de Custo", "Horas", "Observações"])
         dados_env = ws_env.get_all_values()
         cols_env = ["Ano", "Mês", "Projeto", "Nome", "Cargo/Função", "Centro de Custo", "Horas", "Observações"]
@@ -768,11 +687,10 @@ def carregar_dados(cache_buster: int) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Da
 # 7. ESCRITA — APPEND / DELETE / CADASTROS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def invalidate_cache():
-    # cache buster (mais granular do que st.cache_data.clear())
     st.session_state.cache_buster = int(st.session_state.get("cache_buster", 0)) + 1
 
 
-def salvar_lancamentos(linhas: List[List]):
+def salvar_lancamentos(linhas: List[List]) -> bool:
     client = conectar_google()
     if not client:
         return False
@@ -792,13 +710,14 @@ def salvar_lancamentos(linhas: List[List]):
         return False
 
 
-def salvar_envolvido(dados_linha: List[str]):
+def salvar_envolvido(dados_linha: List[str]) -> bool:
     client = conectar_google()
     if not client:
         return False
     try:
         sh = client.open(SHEET_NAME)
-        ws = get_or_create_worksheet(sh, TAB_ENV, rows=1500, cols=8, header=["Ano", "Mês", "Projeto", "Nome", "Cargo/Função", "Centro de Custo", "Horas", "Observações"])
+        ws = get_or_create_worksheet(sh, TAB_ENV, rows=1500, cols=8,
+                                     header=["Ano", "Mês", "Projeto", "Nome", "Cargo/Função", "Centro de Custo", "Horas", "Observações"])
         ensure_schema_simple(ws, ["Ano", "Mês", "Projeto", "Nome", "Cargo/Função", "Centro de Custo", "Horas", "Observações"])
         ws.append_row(dados_linha, value_input_option="USER_ENTERED")
         log_event(sh, "append_envolvido", "append_row", n=1)
@@ -809,7 +728,7 @@ def salvar_envolvido(dados_linha: List[str]):
         return False
 
 
-def salvar_cadastro_novo(tipo: str, nome: str):
+def salvar_cadastro_novo(tipo: str, nome: str) -> bool:
     client = conectar_google()
     if not client:
         return False
@@ -834,7 +753,6 @@ def salvar_cadastro_novo(tipo: str, nome: str):
 
 
 def _group_contiguous(sorted_rows: List[int]) -> List[Tuple[int, int]]:
-    """Agrupa linhas contíguas (1-indexed) em intervalos [start,end]."""
     if not sorted_rows:
         return []
     groups = []
@@ -850,9 +768,6 @@ def _group_contiguous(sorted_rows: List[int]) -> List[Tuple[int, int]]:
 
 
 def excluir_linhas_por_lanc_id(lanc_ids: List[str]) -> bool:
-    """
-    Exclusão segura: encontra índices de linha pelo Lanc_ID e deleta em lote com batch_update.
-    """
     if not lanc_ids:
         return False
 
@@ -866,23 +781,24 @@ def excluir_linhas_por_lanc_id(lanc_ids: List[str]) -> bool:
         if not ws:
             st.error("Aba de lançamentos não encontrada.")
             return False
-        ensure_schema_lanc(ws)
 
+        ensure_schema_lanc(ws)
         values = ws.get_all_values()
         if len(values) <= 1:
             return False
 
         header = [h.strip() for h in values[0]]
         if "Lanc_ID" not in header:
-            st.error("Coluna Lanc_ID não existe na planilha (schema).")
+            st.error("Coluna Lanc_ID não existe na planilha.")
             return False
 
-        col_idx = header.index("Lanc_ID")  # 0-based
+        col_idx = header.index("Lanc_ID")
+        target = set(lanc_ids)
+
         rows_to_delete = []
-        # linhas do Sheets são 1-indexed; dados começam na 2
         for i, row in enumerate(values[1:], start=2):
-            row_lanc_id = row[col_idx].strip() if len(row) > col_idx else ""
-            if row_lanc_id in set(lanc_ids):
+            row_id = row[col_idx].strip() if len(row) > col_idx else ""
+            if row_id in target:
                 rows_to_delete.append(i)
 
         if not rows_to_delete:
@@ -892,23 +808,19 @@ def excluir_linhas_por_lanc_id(lanc_ids: List[str]) -> bool:
         rows_to_delete.sort()
         groups = _group_contiguous(rows_to_delete)
 
-        # batch update: deletar de baixo para cima
         requests = []
         sheet_id = ws._properties.get("sheetId")
         for start, end in reversed(groups):
-            # deleteDimension usa índices 0-based e endIndex exclusivo
-            requests.append(
-                {
-                    "deleteDimension": {
-                        "range": {
-                            "sheetId": sheet_id,
-                            "dimension": "ROWS",
-                            "startIndex": start - 1,
-                            "endIndex": end,
-                        }
+            requests.append({
+                "deleteDimension": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "ROWS",
+                        "startIndex": start - 1,
+                        "endIndex": end,
                     }
                 }
-            )
+            })
 
         sh.batch_update({"requests": requests})
         log_event(sh, "delete_lancamentos", f"by_lanc_id groups={len(groups)}", n=len(rows_to_delete))
@@ -920,166 +832,124 @@ def excluir_linhas_por_lanc_id(lanc_ids: List[str]) -> bool:
         return False
 
 
-def excluir_envolvido_google(row_indices: List[int]) -> bool:
-    """Exclui linhas da aba envolvidos (de baixo para cima) — simples, baixa volumetria."""
-    if not row_indices:
-        return False
-    client = conectar_google()
-    if not client:
-        return False
-    try:
-        sh = client.open(SHEET_NAME)
-        ws = get_worksheet_case_insensitive(sh, TAB_ENV)
-        if not ws:
-            return False
-        for idx in sorted(row_indices, reverse=True):
-            ws.delete_rows(int(idx))
-        log_event(sh, "delete_envolvidos", "delete_rows", n=len(row_indices))
-        invalidate_cache()
-        return True
-    except Exception as e:
-        st.error(f"Erro ao excluir: {e}")
-        return False
-
-
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 8. REGRAS DE NEGÓCIO — ORÇADO vs REALIZADO (vínculo + fallback)
+# 8. REGRAS — ORÇADO vs REALIZADO (vínculo + fallback)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def build_orcamentos_table(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Tabela agregada de orçamentos:
-    - Cada Grupo_ID (parcelamento) vira um orçamento agregado
-    - Se Grupo_ID vazio, usa Lanc_ID como grupo (cada linha é um orçamento)
-    """
     if df.empty:
-        return pd.DataFrame(columns=[
-            "Orc_ID", "Ano", "Mês", "Mes_Num", "Projeto", "Categoria", "Orcado_Total",
-            "Descricao", "Lanc_IDs"
-        ])
+        return pd.DataFrame(columns=["Orc_ID", "Ano", "Mês", "Mes_Num", "Projeto", "Categoria", "Orcado_Total"])
 
     df_orc = df[df["Tipo"] == "Orçado"].copy()
     if df_orc.empty:
-        return pd.DataFrame(columns=[
-            "Orc_ID", "Ano", "Mês", "Mes_Num", "Projeto", "Categoria", "Orcado_Total",
-            "Descricao", "Lanc_IDs"
-        ])
+        return pd.DataFrame(columns=["Orc_ID", "Ano", "Mês", "Mes_Num", "Projeto", "Categoria", "Orcado_Total"])
+
+    if "Mes_Num" not in df_orc.columns:
+        df_orc["Mes_Num"] = df_orc["Mês"].apply(mes_num)
 
     df_orc["Orc_ID"] = df_orc["Grupo_ID"].where(df_orc["Grupo_ID"].astype(str).str.strip() != "", df_orc["Lanc_ID"])
+
     agg = (
         df_orc.groupby(["Orc_ID", "Ano", "Mês", "Mes_Num", "Projeto", "Categoria"], dropna=False)
-        .agg(
-            Orcado_Total=("Valor_num", "sum"),
-            Descricao=("Descrição", lambda x: next((v for v in x if str(v).strip()), "")),
-            Lanc_IDs=("Lanc_ID", lambda x: ",".join(list(x))),
-        )
+        .agg(Orcado_Total=("Valor_num", "sum"))
         .reset_index()
     )
-    agg.rename(columns={"Descricao": "Descricao"}, inplace=True)
     return agg
 
 
 def compute_consumo(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Retorna:
-    - df_orc_agg com colunas: Orc_ID, Orcado_Total, Realizado_Vinculado, Saldo, Status
-    - df_alertas (linhas/avisos)
-    """
     alerts = []
 
     if df.empty:
         return pd.DataFrame(), pd.DataFrame(columns=["Tipo", "Mensagem"])
 
     df = df.copy()
+    if "Mes_Num" not in df.columns:
+        df["Mes_Num"] = df["Mês"].apply(mes_num)
 
-    # tabela de orçamentos
     df_orc = build_orcamentos_table(df)
-
-    # realizados
     df_real = df[df["Tipo"] == "Realizado"].copy()
+
+    if df_orc.empty:
+        # Só realizados, sem orçados
+        if not df_real.empty:
+            grp = df_real.groupby(["Ano", "Mês", "Projeto", "Categoria"], dropna=False)["Valor_num"].sum().reset_index()
+            for _, r in grp.iterrows():
+                alerts.append({
+                    "Tipo": "Realizado sem Orçado",
+                    "Mensagem": f"Realizado {fmt_real(r['Valor_num'])} em {r['Projeto']} / {r['Categoria']} ({r['Mês']} {r['Ano']}) sem orçamento."
+                })
+        return df_orc, pd.DataFrame(alerts, columns=["Tipo", "Mensagem"])
+
     if df_real.empty:
-        df_orc["Realizado_Vinculado"] = 0.0
+        df_orc["Realizado_Total"] = 0.0
         df_orc["Saldo"] = df_orc["Orcado_Total"]
-        df_orc["Uso_%"] = df_orc.apply(lambda r: pct(r["Realizado_Vinculado"], r["Orcado_Total"]), axis=1)
+        df_orc["Uso_%"] = df_orc.apply(lambda r: pct(r["Realizado_Total"], r["Orcado_Total"]), axis=1)
         df_orc["Status"] = np.where(df_orc["Saldo"] < 0, "Estouro", "OK")
         return df_orc, pd.DataFrame(alerts, columns=["Tipo", "Mensagem"])
 
-    # 1) Consumo por vínculo (Orcado_Vinculo)
     df_real["Orc_Vinc"] = df_real["Orcado_Vinculo"].astype(str).fillna("").str.strip()
+
+    # 1) consumo por vínculo
     vinc = df_real[df_real["Orc_Vinc"] != ""]
     consumo_vinc = (
-        vinc.groupby("Orc_Vinc")["Valor_num"].sum().reset_index().rename(columns={"Orc_Vinc": "Orc_ID", "Valor_num": "Realizado_Vinculado"})
+        vinc.groupby("Orc_Vinc")["Valor_num"].sum().reset_index()
+        .rename(columns={"Orc_Vinc": "Orc_ID", "Valor_num": "Realizado_Vinculado"})
     )
 
-    # 2) Fallback por grupo (Ano/Mês/Projeto/Categoria) para realizados sem vínculo
+    # 2) fallback por grupo (para realizados sem vínculo)
     sem_vinc = df_real[df_real["Orc_Vinc"] == ""]
     if not sem_vinc.empty:
-        # alerta: realizado sem orçamento (vai depender de existir orçamento no grupo)
         sem_vinc_grp = (
             sem_vinc.groupby(["Ano", "Mês", "Projeto", "Categoria"], dropna=False)["Valor_num"].sum().reset_index()
         )
-        # mapeia para orçamentos daquele grupo (se houver mais de um, escolhe o maior orçamento do grupo como fallback)
-        if not df_orc.empty:
-            # melhor orçamento por grupo (maior valor)
-            best_orc_in_group = (
-                df_orc.sort_values("Orcado_Total", ascending=False)
-                .groupby(["Ano", "Mês", "Projeto", "Categoria"], dropna=False)
-                .head(1)[["Orc_ID", "Ano", "Mês", "Projeto", "Categoria"]]
-            )
-            sem_vinc_mapped = sem_vinc_grp.merge(best_orc_in_group, on=["Ano", "Mês", "Projeto", "Categoria"], how="left")
-            # consumo fallback
-            consumo_fallback = (
-                sem_vinc_mapped.dropna(subset=["Orc_ID"])
-                .groupby("Orc_ID")["Valor_num"].sum().reset_index().rename(columns={"Valor_num": "Realizado_Fallback"})
-            )
 
-            # alertas: realizados que não acharam orçamento no grupo
-            nao_achou = sem_vinc_mapped[sem_vinc_mapped["Orc_ID"].isna()]
-            if not nao_achou.empty:
-                for _, r in nao_achou.iterrows():
-                    alerts.append(
-                        {
-                            "Tipo": "Realizado sem Orçado",
-                            "Mensagem": f"Realizado {fmt_real(r['Valor_num'])} em {r['Projeto']} / {r['Categoria']} ({r['Mês']} {r['Ano']}) sem orçamento correspondente.",
-                        }
-                    )
-        else:
-            consumo_fallback = pd.DataFrame(columns=["Orc_ID", "Realizado_Fallback"])
-            for _, r in sem_vinc_grp.iterrows():
-                alerts.append(
-                    {
-                        "Tipo": "Realizado sem Orçado",
-                        "Mensagem": f"Realizado {fmt_real(r['Valor_num'])} em {r['Projeto']} / {r['Categoria']} ({r['Mês']} {r['Ano']}) sem orçamento (não há orçados cadastrados).",
-                    }
-                )
+        best_orc_in_group = (
+            df_orc.sort_values("Orcado_Total", ascending=False)
+            .groupby(["Ano", "Mês", "Projeto", "Categoria"], dropna=False)
+            .head(1)[["Orc_ID", "Ano", "Mês", "Projeto", "Categoria"]]
+        )
+
+        sem_vinc_mapped = sem_vinc_grp.merge(best_orc_in_group, on=["Ano", "Mês", "Projeto", "Categoria"], how="left")
+        consumo_fallback = (
+            sem_vinc_mapped.dropna(subset=["Orc_ID"])
+            .groupby("Orc_ID")["Valor_num"].sum().reset_index()
+            .rename(columns={"Valor_num": "Realizado_Fallback"})
+        )
+
+        nao_achou = sem_vinc_mapped[sem_vinc_mapped["Orc_ID"].isna()]
+        if not nao_achou.empty:
+            for _, r in nao_achou.iterrows():
+                alerts.append({
+                    "Tipo": "Realizado sem Orçado",
+                    "Mensagem": f"Realizado {fmt_real(r['Valor_num'])} em {r['Projeto']} / {r['Categoria']} ({r['Mês']} {r['Ano']}) sem orçamento correspondente."
+                })
     else:
         consumo_fallback = pd.DataFrame(columns=["Orc_ID", "Realizado_Fallback"])
 
-    # junta consumos
     df_orc2 = df_orc.merge(consumo_vinc, on="Orc_ID", how="left")
-    if "Realizado_Vinculado" not in df_orc2.columns:
-        df_orc2["Realizado_Vinculado"] = 0.0
-    df_orc2["Realizado_Vinculado"] = df_orc2["Realizado_Vinculado"].fillna(0.0)
+    df_orc2["Realizado_Vinculado"] = df_orc2.get("Realizado_Vinculado", 0.0).fillna(0.0)
 
     if not consumo_fallback.empty:
         df_orc2 = df_orc2.merge(consumo_fallback, on="Orc_ID", how="left")
-        df_orc2["Realizado_Fallback"] = df_orc2["Realizado_Fallback"].fillna(0.0)
+        df_orc2["Realizado_Fallback"] = df_orc2.get("Realizado_Fallback", 0.0).fillna(0.0)
     else:
         df_orc2["Realizado_Fallback"] = 0.0
+
+    # garante Mes_Num no agregado (IMPORTANTE pro sort)
+    if "Mes_Num" not in df_orc2.columns:
+        df_orc2["Mes_Num"] = df_orc2["Mês"].apply(mes_num)
 
     df_orc2["Realizado_Total"] = df_orc2["Realizado_Vinculado"] + df_orc2["Realizado_Fallback"]
     df_orc2["Saldo"] = df_orc2["Orcado_Total"] - df_orc2["Realizado_Total"]
     df_orc2["Uso_%"] = df_orc2.apply(lambda r: pct(r["Realizado_Total"], r["Orcado_Total"]), axis=1)
     df_orc2["Status"] = np.where(df_orc2["Saldo"] < 0, "Estouro", "OK")
 
-    # alerta de estouro
     estouros = df_orc2[df_orc2["Saldo"] < 0]
     for _, r in estouros.iterrows():
-        alerts.append(
-            {
-                "Tipo": "Estouro",
-                "Mensagem": f"Estouro em {r['Projeto']} / {r['Categoria']} ({r['Mês']} {r['Ano']}): saldo {fmt_real(r['Saldo'])}.",
-            }
-        )
+        alerts.append({
+            "Tipo": "Estouro",
+            "Mensagem": f"Estouro em {r['Projeto']} / {r['Categoria']} ({r['Mês']} {r['Ano']}): saldo {fmt_real(r['Saldo'])}."
+        })
 
     return df_orc2, pd.DataFrame(alerts, columns=["Tipo", "Mensagem"])
 
@@ -1104,20 +974,19 @@ def tela_resumo(df: pd.DataFrame):
     with st.expander("🔍 Filtros", expanded=False):
         with st.form("form_filtros_painel"):
             c1, c2 = st.columns(2)
-            ano_sel = c1.selectbox("Ano", anos_disponiveis, index=anos_disponiveis.index(default_ano) if default_ano in anos_disponiveis else 0)
+            ano_sel = c1.selectbox(
+                "Ano", anos_disponiveis,
+                index=anos_disponiveis.index(default_ano) if default_ano in anos_disponiveis else 0
+            )
             meses_disp = sorted(df["Mês"].unique(), key=mes_num)
             meses_sel = c2.multiselect("Meses", meses_disp)
 
             c3, c4 = st.columns(2)
-            proj_disp = sorted(df["Projeto"].unique())
-            proj_sel = c3.multiselect("Projetos", proj_disp)
-
-            cat_disp = sorted(df["Categoria"].unique()) if "Categoria" in df.columns else []
-            cat_sel = c4.multiselect("Categorias", cat_disp)
+            proj_sel = c3.multiselect("Projetos", sorted(df["Projeto"].unique()))
+            cat_sel = c4.multiselect("Categorias", sorted(df["Categoria"].unique()))
 
             st.form_submit_button("Aplicar", type="primary", use_container_width=True)
 
-    # aplica filtros
     df_f = df[df["Ano"] == ano_sel].copy()
     if meses_sel:
         df_f = df_f[df_f["Mês"].isin(meses_sel)]
@@ -1126,10 +995,8 @@ def tela_resumo(df: pd.DataFrame):
     if cat_sel:
         df_f = df_f[df_f["Categoria"].isin(cat_sel)]
 
-    # Consumo “correto” com vínculo/fallback
     df_orc_agg, df_alertas = compute_consumo(df_f)
 
-    # KPIs globais (totais por tipo)
     orcado = df_f[df_f["Tipo"] == "Orçado"]["Valor_num"].sum()
     realizado = df_f[df_f["Tipo"] == "Realizado"]["Valor_num"].sum()
     saldo = orcado - realizado
@@ -1139,32 +1006,26 @@ def tela_resumo(df: pd.DataFrame):
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("💰 Orçado (linhas)", fmt_real(orcado))
     k2.metric("✅ Realizado", fmt_real(realizado), delta=f"{pct_uso:.1f}% do orçado", delta_color="off")
-    k3.metric("📊 Saldo Livre", fmt_real(saldo), delta="Disponível" if saldo >= 0 else "Estouro", delta_color="normal" if saldo >= 0 else "inverse")
+    k3.metric("📊 Saldo Livre", fmt_real(saldo),
+              delta="Disponível" if saldo >= 0 else "Estouro",
+              delta_color="normal" if saldo >= 0 else "inverse")
     k4.metric("🏢 Projetos Ativos", n_proj)
 
-    st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
-
-    # alertas
-    if df_alertas is not None and not df_alertas.empty:
+    if not df_alertas.empty:
         with st.expander(f"⚠️ Alertas ({len(df_alertas)})", expanded=False):
             st.dataframe(df_alertas, use_container_width=True, hide_index=True)
 
-    # barra geral
     render_section_title("Consumo do Orçamento · Geral")
     render_progress_bar(realizado, orcado)
 
-    # por projeto (preferindo agregado por orçamento)
     render_section_title("Consumo por Projeto")
     if not df_orc_agg.empty:
         proj_agg = (
             df_orc_agg.groupby("Projeto")[["Orcado_Total", "Realizado_Total"]]
-            .sum()
-            .reset_index()
+            .sum().reset_index()
             .sort_values("Orcado_Total", ascending=False)
         )
-        rows_html = ""
-        for _, r in proj_agg.iterrows():
-            rows_html += render_progress_row(r["Projeto"], r["Realizado_Total"], r["Orcado_Total"])
+        rows_html = "".join(render_progress_row(r["Projeto"], r["Realizado_Total"], r["Orcado_Total"]) for _, r in proj_agg.iterrows())
         st.markdown(
             f'<div style="background:#FFFFFF;border:1px solid #F0F0F0;border-radius:14px;padding:6px 20px;box-shadow:0 1px 4px rgba(0,0,0,0.04);margin-bottom:20px;">{rows_html}</div>',
             unsafe_allow_html=True,
@@ -1172,18 +1033,14 @@ def tela_resumo(df: pd.DataFrame):
     else:
         st.info("Sem orçamentos para exibir (cadastre ao menos um 'Orçado').")
 
-    # por categoria
     render_section_title("Consumo por Categoria")
     if not df_orc_agg.empty:
         cat_agg = (
             df_orc_agg.groupby("Categoria")[["Orcado_Total", "Realizado_Total"]]
-            .sum()
-            .reset_index()
+            .sum().reset_index()
             .sort_values("Orcado_Total", ascending=False)
         )
-        rows_html = ""
-        for _, r in cat_agg.iterrows():
-            rows_html += render_progress_row(r["Categoria"], r["Realizado_Total"], r["Orcado_Total"])
+        rows_html = "".join(render_progress_row(r["Categoria"], r["Realizado_Total"], r["Orcado_Total"]) for _, r in cat_agg.iterrows())
         st.markdown(
             f'<div style="background:#FFFFFF;border:1px solid #F0F0F0;border-radius:14px;padding:6px 20px;box-shadow:0 1px 4px rgba(0,0,0,0.04);margin-bottom:20px;">{rows_html}</div>',
             unsafe_allow_html=True,
@@ -1191,7 +1048,6 @@ def tela_resumo(df: pd.DataFrame):
     else:
         st.info("Sem orçamentos para exibir (cadastre ao menos um 'Orçado').")
 
-    # evolução mensal (totais por tipo)
     render_section_title("Evolução Mensal")
     df_mes = df_f.groupby(["Mês", "Tipo"])["Valor_num"].sum().reset_index()
     if not df_mes.empty:
@@ -1199,25 +1055,19 @@ def tela_resumo(df: pd.DataFrame):
         df_mes = df_mes.sort_values("Mes_Num")
 
         fig_mes = px.bar(
-            df_mes,
-            x="Mês",
-            y="Valor_num",
-            color="Tipo",
-            barmode="group",
+            df_mes, x="Mês", y="Valor_num", color="Tipo", barmode="group",
             color_discrete_map={"Orçado": CORES["orcado"], "Realizado": CORES["realizado"]},
         )
         fig_mes.update_traces(
-            texttemplate="%{y:.2s}",
-            textposition="outside",
+            texttemplate="%{y:.2s}", textposition="outside",
             marker_line_width=0,
-            hovertemplate="<b>%{x}</b><br>Valor: R$ %{y:,.2f}<extra></extra>",
+            hovertemplate="<b>%{x}</b><br>Valor: R$ %{y:,.2f}<extra></extra>"
         )
         fig_mes.update_layout(height=360, bargap=0.3, bargroupgap=0.08, **PLOTLY_LAYOUT)
         st.plotly_chart(fig_mes, use_container_width=True, config=PLOTLY_CONFIG)
     else:
         st.info("Sem dados mensais para exibir.")
 
-    # waterfall (orçamento total e gastos por categoria)
     render_section_title("Fluxo de Caixa · Waterfall")
     total_orcado = df_f[df_f["Tipo"] == "Orçado"]["Valor_num"].sum()
     df_gastos = (
@@ -1258,21 +1108,15 @@ def tela_resumo(df: pd.DataFrame):
         y_data.append(0)
         text_data.append(fmt_real(saldo_wf))
 
-        fig_wf = go.Figure(
-            go.Waterfall(
-                orientation="v",
-                measure=measures,
-                x=x_data,
-                textposition="outside",
-                text=text_data,
-                y=y_data,
-                connector={"line": {"color": "#E5E5EA", "width": 1, "dash": "dot"}},
-                decreasing={"marker": {"color": CORES["alerta"], "line": {"width": 0}}},
-                increasing={"marker": {"color": CORES["realizado"], "line": {"width": 0}}},
-                totals={"marker": {"color": CORES["primaria"], "line": {"width": 0}}},
-                hovertemplate="<b>%{x}</b><br>%{text}<extra></extra>",
-            )
-        )
+        fig_wf = go.Figure(go.Waterfall(
+            orientation="v", measure=measures, x=x_data,
+            textposition="outside", text=text_data, y=y_data,
+            connector={"line": {"color": "#E5E5EA", "width": 1, "dash": "dot"}},
+            decreasing={"marker": {"color": CORES["alerta"], "line": {"width": 0}}},
+            increasing={"marker": {"color": CORES["realizado"], "line": {"width": 0}}},
+            totals={"marker": {"color": CORES["primaria"], "line": {"width": 0}}},
+            hovertemplate="<b>%{x}</b><br>%{text}<extra></extra>"
+        ))
         fig_wf.update_layout(height=400, waterfallgap=0.3, **PLOTLY_LAYOUT)
         st.plotly_chart(fig_wf, use_container_width=True, config=PLOTLY_CONFIG)
 
@@ -1290,7 +1134,6 @@ def tela_novo(df_lanc: pd.DataFrame, df_cad: pd.DataFrame):
         lista_proj = sorted(df_cad[df_cad["Tipo"].str.lower() == "projeto"]["Nome"].unique().tolist())
         lista_cat = sorted(df_cad[df_cad["Tipo"].str.lower() == "categoria"]["Nome"].unique().tolist())
 
-    # Lista de orçamentos para possível vínculo (em Realizado)
     df_orc_agg = build_orcamentos_table(df_lanc) if not df_lanc.empty else pd.DataFrame()
 
     with st.form("form_novo", clear_on_submit=True):
@@ -1303,19 +1146,11 @@ def tela_novo(df_lanc: pd.DataFrame, df_cad: pd.DataFrame):
         proj_sel = c3.selectbox("🏢 Projeto", lista_proj, index=None, placeholder="Selecione...")
         cat_sel = c4.selectbox("📂 Categoria", lista_cat, index=None, placeholder="Selecione...")
 
-        # Vínculo (aparece só se Realizado e existem orçamentos)
         orc_vinc = ""
         if tipo == "Realizado" and proj_sel and cat_sel and not df_orc_agg.empty:
-            # sugere orçamentos do mesmo projeto/categoria (prioriza mesmo mês/ano)
             mes0 = mes_str_from_date(data_inicial)
             ano0 = data_inicial.year
-
-            cand = df_orc_agg[
-                (df_orc_agg["Projeto"] == proj_sel)
-                & (df_orc_agg["Categoria"] == cat_sel)
-            ].copy()
-
-            # ordena: primeiro mesmo ano/mês, depois maiores
+            cand = df_orc_agg[(df_orc_agg["Projeto"] == proj_sel) & (df_orc_agg["Categoria"] == cat_sel)].copy()
             cand["prio"] = np.where((cand["Ano"] == ano0) & (cand["Mês"] == mes0), 0, 1)
             cand = cand.sort_values(["prio", "Ano", "Mes_Num", "Orcado_Total"], ascending=[True, False, False, False]).head(30)
 
@@ -1334,7 +1169,7 @@ def tela_novo(df_lanc: pd.DataFrame, df_cad: pd.DataFrame):
         render_section_title("Valores")
         c5, c6 = st.columns(2)
         valor = c5.number_input("💵 Valor da Parcela (R$)", min_value=0.0, step=100.0, format="%.2f")
-        qtd_parcelas = c6.number_input("🔁 Nº Parcelas", min_value=1, value=1, step=1, help="Lançamentos mensais consecutivos")
+        qtd_parcelas = c6.number_input("🔁 Nº Parcelas", min_value=1, value=1, step=1)
 
         if valor > 0 and qtd_parcelas > 1:
             st.info(f"Total comprometido: **{fmt_real(valor * qtd_parcelas)}** em {qtd_parcelas} meses")
@@ -1346,7 +1181,6 @@ def tela_novo(df_lanc: pd.DataFrame, df_cad: pd.DataFrame):
         envolvidos = c7.text_input("👥 Envolvidos", placeholder="Ex: João, Fornecedor X")
         info_gerais = c8.text_area("📋 Observações", placeholder="Notas livres...", height=96)
 
-        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
         submitted = st.form_submit_button("💾 Salvar Lançamento", type="primary", use_container_width=True)
 
         if submitted:
@@ -1355,43 +1189,37 @@ def tela_novo(df_lanc: pd.DataFrame, df_cad: pd.DataFrame):
             elif valor <= 0:
                 st.error("Informe um valor maior que zero.")
             else:
-                grupo_id = uuid4()  # agrupa parcelas
-                linhas = []
+                grupo_id = uuid4()
                 criado_em = now_iso()
+                linhas = []
                 for i in range(int(qtd_parcelas)):
                     data_calc = data_inicial + relativedelta(months=i)
                     mes_str = mes_str_from_date(data_calc)
-                    valor_fmt = fmt_real(valor)
                     lanc_id = uuid4()
-
-                    # se for Orçado, o próprio Grupo_ID vira o orçamento (Orc_ID)
-                    # se for Realizado e houver vínculo selecionado, grava Orcado_Vinculo
+                    valor_fmt = fmt_real(valor)
                     orc_vinc_to_save = orc_vinc if (tipo == "Realizado") else ""
 
-                    linhas.append(
-                        [
-                            data_calc.strftime("%d/%m/%Y"),
-                            data_calc.year,
-                            mes_str,
-                            tipo,
-                            proj_sel,
-                            cat_sel,
-                            valor_fmt,
-                            desc,
-                            f"{i+1} de {qtd_parcelas}",
-                            "Não",
-                            envolvidos,
-                            info_gerais,
-                            lanc_id,
-                            grupo_id,
-                            orc_vinc_to_save,
-                            criado_em,
-                        ]
-                    )
+                    linhas.append([
+                        data_calc.strftime("%d/%m/%Y"),
+                        data_calc.year,
+                        mes_str,
+                        tipo,
+                        proj_sel,
+                        cat_sel,
+                        valor_fmt,
+                        desc,
+                        f"{i+1} de {qtd_parcelas}",
+                        "Não",
+                        envolvidos,
+                        info_gerais,
+                        lanc_id,
+                        grupo_id,
+                        orc_vinc_to_save,
+                        criado_em
+                    ])
 
                 with st.spinner("Salvando lançamentos..."):
-                    ok = salvar_lancamentos(linhas)
-                    if ok:
+                    if salvar_lancamentos(linhas):
                         st.toast(f"{qtd_parcelas} lançamento(s) salvo(s)!", icon="✅")
                         st.success("Tudo certo — dados gravados.")
                         st.rerun()
@@ -1428,15 +1256,13 @@ def tela_dados(df: pd.DataFrame):
             filtro_proj = c3.multiselect("🏢 Projeto", sorted(df["Projeto"].unique()))
             filtro_tipo = c4.multiselect("🏷️ Tipo", sorted(df["Tipo"].unique()))
             filtro_cat = c5.multiselect("📂 Categoria", sorted(df["Categoria"].unique()))
-
             st.form_submit_button("Aplicar Filtros", type="primary", use_container_width=True)
 
         if not filtro_ano:
             st.warning("Selecione pelo menos um **Ano** para visualizar os dados.")
             return
 
-        df_view = df.copy()
-        df_view = df_view[df_view["Ano"].isin(filtro_ano)]
+        df_view = df[df["Ano"].isin(filtro_ano)].copy()
         if filtro_mes:
             df_view = df_view[df_view["Mês"].isin(filtro_mes)]
         if filtro_proj:
@@ -1446,7 +1272,6 @@ def tela_dados(df: pd.DataFrame):
         if filtro_cat:
             df_view = df_view[df_view["Categoria"].isin(filtro_cat)]
 
-        # KPIs simples
         tot_orc = df_view[df_view["Tipo"] == "Orçado"]["Valor_num"].sum()
         tot_real = df_view[df_view["Tipo"] == "Realizado"]["Valor_num"].sum()
 
@@ -1454,16 +1279,16 @@ def tela_dados(df: pd.DataFrame):
         m1.metric("📋 Registros", len(df_view))
         m2.metric("💰 Total Orçado", fmt_real(tot_orc))
         m3.metric("✅ Total Realizado", fmt_real(tot_real))
-        m4.metric("📊 Saldo", fmt_real(tot_orc - tot_real), delta_color="normal" if tot_orc >= tot_real else "inverse")
+        m4.metric("📊 Saldo", fmt_real(tot_orc - tot_real),
+                  delta_color="normal" if tot_orc >= tot_real else "inverse")
 
         st.markdown("<hr>", unsafe_allow_html=True)
 
-        # download
-        csv = df_view.copy()
-        # deixa mais amigável para export
-        cols_export = ["Data", "Ano", "Mês", "Tipo", "Projeto", "Categoria", "Valor_num", "Descrição", "Parcela", "Envolvidos", "Info Gerais", "Lanc_ID", "Grupo_ID", "Orcado_Vinculo", "Criado_Em"]
-        cols_export = [c for c in cols_export if c in csv.columns]
-        csv = csv[cols_export].rename(columns={"Valor_num": "Valor"})
+        cols_export = ["Data", "Ano", "Mês", "Tipo", "Projeto", "Categoria", "Valor_num",
+                       "Descrição", "Parcela", "Envolvidos", "Info Gerais",
+                       "Lanc_ID", "Grupo_ID", "Orcado_Vinculo", "Criado_Em"]
+        cols_export = [c for c in cols_export if c in df_view.columns]
+        csv = df_view[cols_export].rename(columns={"Valor_num": "Valor"})
         st.download_button(
             "⬇️ Baixar CSV (filtro atual)",
             data=csv.to_csv(index=False).encode("utf-8"),
@@ -1474,7 +1299,6 @@ def tela_dados(df: pd.DataFrame):
 
         st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
 
-        # Paginação
         tamanho_pagina = 50
         total_paginas = max(1, math.ceil(len(df_view) / tamanho_pagina))
         if total_paginas > 1:
@@ -1493,20 +1317,8 @@ def tela_dados(df: pd.DataFrame):
         df_paginado = df_view.iloc[inicio:fim].copy()
         df_paginado["Excluir"] = False
 
-        # exibe sem IDs (mas mantém internamente para excluir)
-        colunas_show = [
-            "Data",
-            "Mês",
-            "Tipo",
-            "Projeto",
-            "Categoria",
-            "Valor_num",
-            "Descrição",
-            "Envolvidos",
-            "Info Gerais",
-            "Parcela",
-            "Excluir",
-        ]
+        colunas_show = ["Data", "Mês", "Tipo", "Projeto", "Categoria", "Valor_num",
+                        "Descrição", "Envolvidos", "Info Gerais", "Parcela", "Excluir"]
         df_show = df_paginado[colunas_show].rename(columns={"Valor_num": "Valor"})
 
         df_edited = st.data_editor(
@@ -1514,8 +1326,6 @@ def tela_dados(df: pd.DataFrame):
             column_config={
                 "Excluir": st.column_config.CheckboxColumn("🗑️", width="small", default=False),
                 "Valor": st.column_config.NumberColumn("Valor (R$)", format="R$ %.2f"),
-                "Descrição": st.column_config.TextColumn("Descrição"),
-                "Info Gerais": st.column_config.TextColumn("Info Gerais"),
             },
             disabled=["Data", "Mês", "Tipo", "Projeto", "Categoria", "Valor", "Descrição", "Envolvidos", "Info Gerais", "Parcela"],
             hide_index=True,
@@ -1527,7 +1337,6 @@ def tela_dados(df: pd.DataFrame):
         if not linhas_excluir.empty:
             st.error(f"⚠️ **{len(linhas_excluir)} registro(s)** marcado(s) para exclusão. Esta ação não pode ser desfeita.")
             if st.button("🗑️ Confirmar Exclusão", type="primary", use_container_width=True):
-                # pega os Lanc_ID correspondentes aos índices do df_edited (mesma ordem do df_paginado)
                 ids = df_paginado.loc[linhas_excluir.index, "Lanc_ID"].tolist()
                 with st.spinner("Excluindo registros..."):
                     if excluir_linhas_por_lanc_id(ids):
@@ -1571,7 +1380,6 @@ def tela_dados(df: pd.DataFrame):
         if status_sel:
             view = view[view["Status"].isin(status_sel)]
 
-        # KPIs orçamentos
         tot_orc = view["Orcado_Total"].sum()
         tot_real = view["Realizado_Total"].sum()
         saldo = tot_orc - tot_real
@@ -1582,27 +1390,28 @@ def tela_dados(df: pd.DataFrame):
         a3.metric("✅ Realizado (alocado)", fmt_real(tot_real))
         a4.metric("📊 Saldo", fmt_real(saldo), delta_color="normal" if saldo >= 0 else "inverse")
 
-        if df_alertas is not None and not df_alertas.empty:
+        if not df_alertas.empty:
             with st.expander(f"⚠️ Alertas ({len(df_alertas)})", expanded=False):
                 st.dataframe(df_alertas, use_container_width=True, hide_index=True)
 
-        # tabela
+        # ✅ CORREÇÃO DO KEYERROR:
+        # Ordena usando view (que tem Mes_Num), depois seleciona colunas para exibir.
         show_cols = ["Ano", "Mês", "Projeto", "Categoria", "Orcado_Total", "Realizado_Total", "Saldo", "Uso_%", "Status", "Orc_ID"]
         view_sorted = view.sort_values(["Ano", "Mes_Num", "Projeto", "Categoria"], ascending=[False, False, True, True])
-out = view_sorted[show_cols].copy()
+        out = view_sorted[show_cols].copy()
 
-st.dataframe(
-    out,
-    use_container_width=True,
-    hide_index=True,
-    column_config={
-        "Orcado_Total": st.column_config.NumberColumn("Orçado", format="R$ %.2f"),
-        "Realizado_Total": st.column_config.NumberColumn("Realizado", format="R$ %.2f"),
-        "Saldo": st.column_config.NumberColumn("Saldo", format="R$ %.2f"),
-        "Uso_%": st.column_config.NumberColumn("Uso %", format="%.1f"),
-        "Orc_ID": st.column_config.TextColumn("Orc_ID"),
-    },
-)
+        st.dataframe(
+            out,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Orcado_Total": st.column_config.NumberColumn("Orçado", format="R$ %.2f"),
+                "Realizado_Total": st.column_config.NumberColumn("Realizado", format="R$ %.2f"),
+                "Saldo": st.column_config.NumberColumn("Saldo", format="R$ %.2f"),
+                "Uso_%": st.column_config.NumberColumn("Uso %", format="%.1f"),
+                "Orc_ID": st.column_config.TextColumn("Orc_ID"),
+            },
+        )
 
 
 def tela_cadastros(df_cad: pd.DataFrame, df_env: pd.DataFrame):
@@ -1651,7 +1460,6 @@ def tela_cadastros(df_cad: pd.DataFrame, df_env: pd.DataFrame):
 
     st.markdown("<hr>", unsafe_allow_html=True)
 
-    # Envolvidos
     render_section_title("👥 Envolvidos por Projeto / Mês")
     st.markdown(
         "<p style='color:#8E8E93; font-size:13px; margin-top:-4px; margin-bottom:16px;'>Cadastre as pessoas alocadas em cada projeto por mês para apuração de centro de custo e mão de obra.</p>",
@@ -1678,7 +1486,7 @@ def tela_cadastros(df_cad: pd.DataFrame, df_env: pd.DataFrame):
         env_cc = ce6.text_input("🏦 Centro de Custo", placeholder="Ex: TI-001")
 
         ce7, ce8 = st.columns(2)
-        env_horas = ce7.number_input("⏰ Horas Dedicadas", min_value=0.0, step=1.0, format="%.1f", help="Total de horas dedicadas ao projeto neste mês")
+        env_horas = ce7.number_input("⏰ Horas Dedicadas", min_value=0.0, step=1.0, format="%.1f")
         env_obs = ce8.text_input("📝 Observações", placeholder="Opcional")
 
         if st.form_submit_button("💾 Cadastrar Envolvido", type="primary", use_container_width=True):
@@ -1687,7 +1495,8 @@ def tela_cadastros(df_cad: pd.DataFrame, df_env: pd.DataFrame):
             elif env_proj is None:
                 st.error("Selecione um projeto.")
             else:
-                linha = [str(env_ano), env_mes, env_proj, env_nome.strip(), env_cargo.strip(), env_cc.strip(), str(env_horas), env_obs.strip()]
+                linha = [str(env_ano), env_mes, env_proj, env_nome.strip(),
+                         env_cargo.strip(), env_cc.strip(), str(env_horas), env_obs.strip()]
                 with st.spinner("Salvando envolvido..."):
                     if salvar_envolvido(linha):
                         st.toast(f"{env_nome} cadastrado em {env_proj} ({env_mes})!", icon="✅")
@@ -1696,7 +1505,6 @@ def tela_cadastros(df_cad: pd.DataFrame, df_env: pd.DataFrame):
 
     if not df_env.empty:
         render_section_title("Envolvidos Cadastrados")
-
         fe1, fe2, fe3 = st.columns(3)
         filtro_env_ano = fe1.selectbox("Filtrar Ano", sorted(df_env["Ano"].unique(), reverse=True), index=0, key="filtro_env_ano")
         df_env_f = df_env[df_env["Ano"] == str(filtro_env_ano)]
@@ -1715,33 +1523,17 @@ def tela_cadastros(df_cad: pd.DataFrame, df_env: pd.DataFrame):
             st.caption(f"{len(df_env_f)} registro(s) encontrado(s)")
             st.dataframe(
                 df_env_f[["Mês", "Projeto", "Nome", "Cargo/Função", "Centro de Custo", "Horas", "Observações"]],
-                use_container_width=True,
-                hide_index=True,
-                column_config={"Horas": st.column_config.NumberColumn("Horas", format="%.1f")},
+                use_container_width=True, hide_index=True,
+                column_config={"Horas": st.column_config.NumberColumn("Horas", format="%.1f")}
             )
-
-            # Resumo por CC
-            df_env_f = df_env_f.copy()
-            df_env_f["Horas_num"] = pd.to_numeric(df_env_f["Horas"], errors="coerce").fillna(0)
-            resumo_cc = df_env_f.groupby("Centro de Custo")["Horas_num"].sum().reset_index().rename(columns={"Horas_num": "Total Horas"})
-            resumo_cc = resumo_cc.sort_values("Total Horas", ascending=False)
-
-            if not resumo_cc.empty:
-                render_section_title("Resumo por Centro de Custo")
-                st.dataframe(
-                    resumo_cc,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={"Total Horas": st.column_config.NumberColumn(format="%.1f")},
-                )
         else:
             st.info("Nenhum envolvido encontrado para os filtros selecionados.")
     else:
-        st.info("Nenhum envolvido cadastrado ainda. Use o formulário acima para começar.")
+        st.info("Nenhum envolvido cadastrado ainda.")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 10. MENU / MAIN
+# 10. MAIN / MENU
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def main():
     if "pagina" not in st.session_state:
@@ -1760,7 +1552,7 @@ def main():
             🎯 Controle Orçamentário
           </div>
           <div style="font-size:13px; color:#8E8E93; margin-top:2px;">
-            Gestão Financeira · v6.0
+            Gestão Financeira · v6.1
           </div>
         </div>
         """,
@@ -1808,7 +1600,6 @@ def main():
 
         st.markdown("<hr>", unsafe_allow_html=True)
 
-        # mini resumo ano atual
         if not df_lancamentos.empty:
             ano_atual = date.today().year
             df_ano = df_lancamentos[df_lancamentos["Ano"] == ano_atual]
@@ -1836,8 +1627,7 @@ def main():
                 de {fmt_real(tot_orc)} orçados
               </div>
               <div style="background:#E5E5E5; border-radius:4px; height:5px; margin-top:10px; overflow:hidden;">
-                <div style="background:{cor_sb}; width:{min(uso_pct,100):.0f}%; height:5px;
-                     border-radius:4px; transition:width 0.6s ease;"></div>
+                <div style="background:{cor_sb}; width:{min(uso_pct,100):.0f}%; height:5px; border-radius:4px;"></div>
               </div>
               <div style="font-size:11px; color:{cor_sb}; font-weight:600; margin-top:4px;">
                 {uso_pct:.0f}% consumido
@@ -1860,7 +1650,6 @@ def main():
             unsafe_allow_html=True,
         )
 
-    # roteamento
     if st.session_state.pagina == "painel":
         tela_resumo(df_lancamentos)
     elif st.session_state.pagina == "novo":
@@ -1873,4 +1662,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
