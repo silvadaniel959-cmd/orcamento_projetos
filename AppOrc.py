@@ -1588,19 +1588,21 @@ def tela_dados(df: pd.DataFrame):
 
         # tabela
         show_cols = ["Ano", "Mês", "Projeto", "Categoria", "Orcado_Total", "Realizado_Total", "Saldo", "Uso_%", "Status", "Orc_ID"]
-        out = view[show_cols].copy()
-        st.dataframe(
-            out.sort_values(["Ano", "Mes_Num", "Projeto", "Categoria"], ascending=[False, False, True, True]),
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Orcado_Total": st.column_config.NumberColumn("Orçado", format="R$ %.2f"),
-                "Realizado_Total": st.column_config.NumberColumn("Realizado", format="R$ %.2f"),
-                "Saldo": st.column_config.NumberColumn("Saldo", format="R$ %.2f"),
-                "Uso_%": st.column_config.NumberColumn("Uso %", format="%.1f"),
-                "Orc_ID": st.column_config.TextColumn("Orc_ID"),
-            },
-        )
+        view_sorted = view.sort_values(["Ano", "Mes_Num", "Projeto", "Categoria"], ascending=[False, False, True, True])
+out = view_sorted[show_cols].copy()
+
+st.dataframe(
+    out,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "Orcado_Total": st.column_config.NumberColumn("Orçado", format="R$ %.2f"),
+        "Realizado_Total": st.column_config.NumberColumn("Realizado", format="R$ %.2f"),
+        "Saldo": st.column_config.NumberColumn("Saldo", format="R$ %.2f"),
+        "Uso_%": st.column_config.NumberColumn("Uso %", format="%.1f"),
+        "Orc_ID": st.column_config.TextColumn("Orc_ID"),
+    },
+)
 
 
 def tela_cadastros(df_cad: pd.DataFrame, df_env: pd.DataFrame):
@@ -1871,3 +1873,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
