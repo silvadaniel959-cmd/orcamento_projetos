@@ -1,26 +1,19 @@
 """
-Controle Orçamentário v6.1 (revisado)
+Controle Orçamentário v6.2 (revisado)
 ====================================
 Streamlit + Google Sheets
 
-Correções e melhorias incluídas:
-- carregar_dados SEMPRE retorna 3 DataFrames (corrige unpack)
-- Ordenação cronológica de meses (Mes_Num)
-- Conversão de moeda robusta e mais eficiente (vectorizada)
-- Normalização de textos e Tipo
-- Ano derivado da Data quando possível (e flag Ano_Invalido)
-- IDs: Lanc_ID (UUID por linha), Grupo_ID (parcelamento), Orcado_Vinculo (Realizado -> Orçado)
-- Exclusão segura por Lanc_ID (não depende de índice de linha)
-- Exclusão em lote via batch_update (menos rate-limit)
-- Cache buster granular (sem st.cache_data.clear())
-- Tela "Orçamentos (agregado)" com cálculo correto e sem KeyError:
-  * Mes_Num garantido no agregado
-  * sort_values aplicado no DataFrame que contém Mes_Num
-- Download CSV com filtro aplicado
-- Log simples em aba "logs"
+Inclui:
+- Tela "Acesso Restrito" (senha) antes de abrir tudo (igual ao print)
+- carregar_dados sempre retorna 3 DataFrames
+- Conversão moeda BR robusta (vectorizada)
+- Mes_Num garantido + ordenações sem KeyError
+- Exclusão segura por Lanc_ID (batch_update)
+- Cache buster via session_state (sem st.cache_data.clear())
 """
 
 import streamlit as st
+import streamlit.components.v1 as components  # (mantém disponível se quiser usar HTML via iframe)
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -47,18 +40,20 @@ st.set_page_config(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 2. CSS — FUNDO BRANCO, BOTÕES AZUIS, RESPONSIVO
+# 2. CSS GLOBAL + CSS TELA DE LOGIN
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 st.markdown(
     """
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <style>
+    /* ══════════ Reset & Base ══════════ */
     html, body, [class*="css"] {
         font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display",
                      "Inter", "Helvetica Neue", Arial, sans-serif;
         -webkit-font-smoothing: antialiased;
     }
 
+    /* ══════════ FUNDO BRANCO ══════════ */
     .stApp, .stApp > header, [data-testid="stHeader"] {
         background: #FFFFFF !important;
     }
@@ -68,11 +63,13 @@ st.markdown(
         background: #FFFFFF !important;
     }
 
+    /* ══════════ Sidebar ══════════ */
     [data-testid="stSidebar"] {
         background: #FAFAFA;
         border-right: 1px solid #F0F0F0;
     }
 
+    /* ══════════ Metric Cards (st.metric nativo) ══════════ */
     div[data-testid="stMetric"] {
         background: #FFFFFF;
         border: 1px solid #F0F0F0;
@@ -103,6 +100,7 @@ st.markdown(
         font-weight: 500 !important;
     }
 
+    /* ══════════ Forms ══════════ */
     [data-testid="stForm"] {
         background: #FAFAFA;
         border: 1px solid #F0F0F0;
@@ -110,6 +108,7 @@ st.markdown(
         padding: 24px;
     }
 
+    /* ══════════ Inputs — Touch-friendly ══════════ */
     .stTextInput > div > div > input,
     .stNumberInput > div > div > input,
     .stTextArea > div > div > textarea,
@@ -130,6 +129,7 @@ st.markdown(
         box-shadow: 0 0 0 3px rgba(0,122,255,0.1) !important;
     }
 
+    /* ══════════ BOTÕES AZUIS — Seletores agressivos ══════════ */
     .stButton > button[kind="primary"],
     .stButton > button[data-testid="baseButton-primary"],
     .stFormSubmitButton > button,
@@ -161,6 +161,7 @@ st.markdown(
         transform: scale(0.98);
     }
 
+    /* Secondary buttons */
     .stButton > button:not([kind="primary"]) {
         border-radius: 12px !important;
         font-weight: 500 !important;
@@ -173,6 +174,7 @@ st.markdown(
         border-color: #D1D1D6 !important;
     }
 
+    /* ══════════ Data Editor / Tables ══════════ */
     .stDataFrame, [data-testid="stDataEditor"] {
         border-radius: 12px !important;
         overflow: hidden;
@@ -183,6 +185,7 @@ st.markdown(
         -webkit-overflow-scrolling: touch;
     }
 
+    /* ══════════ Expander ══════════ */
     [data-testid="stExpander"] {
         background: #FAFAFA;
         border: 1px solid #F0F0F0;
@@ -190,30 +193,30 @@ st.markdown(
         overflow: hidden;
     }
 
+    /* ══════════ Headings ══════════ */
     h1 { font-size: 28px !important; font-weight: 700 !important; color: #1C1C1E !important; }
     h2 { font-size: 22px !important; font-weight: 600 !important; color: #1C1C1E !important; }
     h3 { font-size: 17px !important; font-weight: 600 !important; color: #1C1C1E !important; }
 
-    .stMultiSelect [data-baseweb="tag"] {
-        background: rgba(0,122,255,0.1) !important;
-        border-radius: 8px !important;
-        color: #007AFF !important;
-    }
-
+    /* ══════════ Alerts ══════════ */
     [data-testid="stAlert"] { border-radius: 12px !important; border: none !important; }
 
+    /* ══════════ Divider ══════════ */
     hr { border: none; border-top: 1px solid #F0F0F0; margin: 1.2rem 0; }
 
+    /* ══════════ Scrollbar ══════════ */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: #D1D1D6; border-radius: 3px; }
 
+    /* ══════════ RESPONSIVE: iPad ══════════ */
     @media screen and (max-width: 1024px) {
         .block-container { padding-left: 1rem; padding-right: 1rem; max-width: 100%; }
         [data-testid="stMetricValue"] { font-size: 20px !important; }
         h1 { font-size: 24px !important; }
     }
 
+    /* ══════════ RESPONSIVE: iPhone ══════════ */
     @media screen and (max-width: 768px) {
         .block-container { padding: 0.8rem 0.75rem 5rem 0.75rem; }
         div[data-testid="stMetric"] { padding: 14px 16px; border-radius: 12px; }
@@ -225,25 +228,51 @@ st.markdown(
         [data-testid="stForm"] { padding: 16px; border-radius: 12px; }
     }
 
-    @media screen and (max-width: 390px) {
-        .block-container { padding-left: 0.5rem; padding-right: 0.5rem; }
-        [data-testid="stMetricValue"] { font-size: 16px !important; }
-        h1 { font-size: 20px !important; }
+    /* ══════════ Tela de Login (Acesso Restrito) ══════════ */
+    .auth-wrap{
+      max-width: 980px;
+      margin: 9vh auto 0 auto;
+      padding: 0 16px;
     }
-
-    @supports (padding-bottom: env(safe-area-inset-bottom)) {
-        .block-container { padding-bottom: calc(5rem + env(safe-area-inset-bottom)); }
+    .auth-title{
+      display:flex; align-items:center; gap:14px;
+      font-size: 54px; font-weight: 800; color:#111827;
+      letter-spacing: -1px;
+      margin: 0 0 10px 0;
     }
-
-    @media (hover: none) and (pointer: coarse) {
-        div[data-testid="stMetric"]:hover { transform: none; }
-        div[data-testid="stMetric"]:active { transform: scale(0.98); }
-        button { min-height: 44px !important; min-width: 44px !important; }
+    .auth-sub{
+      font-size: 16px; color:#6B7280;
+      margin: 0 0 14px 0;
     }
+    .auth-card{
+      background: transparent;
+      border-radius: 18px;
+    }
+    .auth-card .stTextInput input{
+      height: 52px !important;
+      border-radius: 14px !important;
+      border: 1.5px solid #E5E7EB !important;
+      background: #F3F4F6 !important;
+      font-size: 16px !important;
+      padding-left: 16px !important;
+    }
+    .auth-card .stTextInput input:focus{
+      border-color:#007AFF !important;
+      box-shadow: 0 0 0 3px rgba(0,122,255,0.12) !important;
+      background: #FFFFFF !important;
+    }
+    .auth-card .stButton button{
+      height: 52px !important;
+      border-radius: 14px !important;
+      font-size: 16px !important;
+      font-weight: 700 !important;
+      padding: 0 26px !important;
+    }
+    .auth-card label { display:none !important; }
 
-    @media print {
-        [data-testid="stSidebar"] { display: none !important; }
-        .stApp { background: white !important; }
+    @media (max-width: 768px){
+      .auth-title{ font-size: 40px; }
+      .auth-wrap{ margin-top: 7vh; }
     }
 </style>
 """,
@@ -381,7 +410,10 @@ def render_progress_bar(consumido, orcado, label=None):
         cor = CORES["alerta"]
         cor_bg = "rgba(255,59,48,0.12)"
 
-    label_html = f'<div style="font-size:14px; font-weight:600; color:#1C1C1E; margin-bottom:10px;">{label}</div>' if label else ""
+    label_html = (
+        f'<div style="font-size:14px; font-weight:600; color:#1C1C1E; margin-bottom:10px;">{label}</div>'
+        if label else ""
+    )
 
     st.markdown(
         f"""
@@ -442,7 +474,41 @@ def render_progress_row(nome, consumido, orcado):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 5. GOOGLE SHEETS — CONEXÃO + SCHEMA
+# 5. TELA DE SENHA (ANTES DE ABRIR O APP)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def gate_password_screen() -> None:
+    """Tela de acesso restrito antes de mostrar o app inteiro."""
+    if st.session_state.get("auth_ok"):
+        return
+
+    senha_correta = st.secrets.get("app_password") or os.getenv("APP_PASSWORD")
+    if not senha_correta:
+        st.error("Senha não configurada. Defina `app_password` em .streamlit/secrets.toml ou APP_PASSWORD no ambiente.")
+        st.stop()
+
+    st.markdown('<div class="auth-wrap">', unsafe_allow_html=True)
+    st.markdown('<div class="auth-title">🔒 <span>Acesso Restrito</span></div>', unsafe_allow_html=True)
+    st.markdown('<p class="auth-sub">Digite a senha de acesso</p>', unsafe_allow_html=True)
+    st.markdown('<div class="auth-card">', unsafe_allow_html=True)
+
+    with st.form("auth_form", clear_on_submit=False):
+        senha = st.text_input("Senha", type="password", placeholder="••••••••••")
+        entrar = st.form_submit_button("Entrar", type="primary")
+
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
+    if entrar:
+        if senha == senha_correta:
+            st.session_state["auth_ok"] = True
+            st.rerun()
+        else:
+            st.error("Senha incorreta.")
+
+    st.stop()
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 6. GOOGLE SHEETS — CONEXÃO + SCHEMA
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 @st.cache_resource(ttl=300)
 def conectar_google():
@@ -547,7 +613,7 @@ def log_event(sh, action: str, detail: str, n: int = 0):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 6. DADOS — LOAD / CLEAN
+# 7. DADOS — LOAD / CLEAN
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def moeda_to_float_series(s: pd.Series) -> pd.Series:
     if s is None or len(s) == 0:
@@ -555,7 +621,6 @@ def moeda_to_float_series(s: pd.Series) -> pd.Series:
 
     x = s.astype(str).fillna("").str.strip()
     x = x.replace({"": "0", "None": "0", "nan": "0", "NaN": "0"})
-
     x = x.str.replace("R$", "", regex=False).str.replace(" ", "", regex=False)
 
     has_comma = x.str.contains(",", regex=False)
@@ -615,7 +680,9 @@ def ensure_month_consistency(df: pd.DataFrame) -> pd.DataFrame:
     if "Mês" not in df.columns:
         df["Mês"] = ""
     mask = (df["Mês"].astype(str).str.strip() == "") & (df["Data_dt"].notna())
-    df.loc[mask, "Mês"] = df.loc[mask, "Data_dt"].dt.month.apply(lambda m: f"{int(m):02d} - {MESES_PT[int(m)]}")
+    df.loc[mask, "Mês"] = df.loc[mask, "Data_dt"].dt.month.apply(
+        lambda m: f"{int(m):02d} - {MESES_PT[int(m)]}"
+    )
     return df
 
 
@@ -655,8 +722,9 @@ def carregar_dados(cache_buster: int) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Da
 
         df_lanc["Mes_Num"] = df_lanc["Mês"].apply(mes_num)
 
-        # IDs em memória (novos já vão gravados; antigos podem estar vazios)
-        df_lanc["Lanc_ID"] = df_lanc["Lanc_ID"].replace({"": np.nan}).fillna(df_lanc.apply(lambda _: uuid4(), axis=1))
+        df_lanc["Lanc_ID"] = df_lanc["Lanc_ID"].replace({"": np.nan}).fillna(
+            df_lanc.apply(lambda _: uuid4(), axis=1)
+        )
         df_lanc["Grupo_ID"] = df_lanc["Grupo_ID"].replace({"": np.nan}).fillna("")
         df_lanc["Orcado_Vinculo"] = df_lanc["Orcado_Vinculo"].replace({"": np.nan}).fillna("")
 
@@ -668,8 +736,10 @@ def carregar_dados(cache_buster: int) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Da
         df_cad = normalize_text_cols(df_cad, ["Tipo", "Nome"])
 
         # envolvidos
-        ws_env = get_or_create_worksheet(sh, TAB_ENV, rows=1500, cols=8,
-                                         header=["Ano", "Mês", "Projeto", "Nome", "Cargo/Função", "Centro de Custo", "Horas", "Observações"])
+        ws_env = get_or_create_worksheet(
+            sh, TAB_ENV, rows=1500, cols=8,
+            header=["Ano", "Mês", "Projeto", "Nome", "Cargo/Função", "Centro de Custo", "Horas", "Observações"]
+        )
         ensure_schema_simple(ws_env, ["Ano", "Mês", "Projeto", "Nome", "Cargo/Função", "Centro de Custo", "Horas", "Observações"])
         dados_env = ws_env.get_all_values()
         cols_env = ["Ano", "Mês", "Projeto", "Nome", "Cargo/Função", "Centro de Custo", "Horas", "Observações"]
@@ -684,7 +754,7 @@ def carregar_dados(cache_buster: int) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Da
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 7. ESCRITA — APPEND / DELETE / CADASTROS
+# 8. ESCRITA — APPEND / DELETE / CADASTROS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def invalidate_cache():
     st.session_state.cache_buster = int(st.session_state.get("cache_buster", 0)) + 1
@@ -716,8 +786,10 @@ def salvar_envolvido(dados_linha: List[str]) -> bool:
         return False
     try:
         sh = client.open(SHEET_NAME)
-        ws = get_or_create_worksheet(sh, TAB_ENV, rows=1500, cols=8,
-                                     header=["Ano", "Mês", "Projeto", "Nome", "Cargo/Função", "Centro de Custo", "Horas", "Observações"])
+        ws = get_or_create_worksheet(
+            sh, TAB_ENV, rows=1500, cols=8,
+            header=["Ano", "Mês", "Projeto", "Nome", "Cargo/Função", "Centro de Custo", "Horas", "Observações"]
+        )
         ensure_schema_simple(ws, ["Ano", "Mês", "Projeto", "Nome", "Cargo/Função", "Centro de Custo", "Horas", "Observações"])
         ws.append_row(dados_linha, value_input_option="USER_ENTERED")
         log_event(sh, "append_envolvido", "append_row", n=1)
@@ -739,7 +811,11 @@ def salvar_cadastro_novo(tipo: str, nome: str) -> bool:
 
         dados_existentes = ws.get_all_values()
         for row in dados_existentes[1:]:
-            if len(row) >= 2 and row[0].strip().lower() == tipo.strip().lower() and row[1].strip().lower() == nome.strip().lower():
+            if (
+                len(row) >= 2
+                and row[0].strip().lower() == tipo.strip().lower()
+                and row[1].strip().lower() == nome.strip().lower()
+            ):
                 st.warning(f"'{nome}' já existe em {tipo}.")
                 return False
 
@@ -833,7 +909,7 @@ def excluir_linhas_por_lanc_id(lanc_ids: List[str]) -> bool:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 8. REGRAS — ORÇADO vs REALIZADO (vínculo + fallback)
+# 9. ORÇADO x REALIZADO — AGREGADO
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def build_orcamentos_table(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -846,7 +922,10 @@ def build_orcamentos_table(df: pd.DataFrame) -> pd.DataFrame:
     if "Mes_Num" not in df_orc.columns:
         df_orc["Mes_Num"] = df_orc["Mês"].apply(mes_num)
 
-    df_orc["Orc_ID"] = df_orc["Grupo_ID"].where(df_orc["Grupo_ID"].astype(str).str.strip() != "", df_orc["Lanc_ID"])
+    df_orc["Orc_ID"] = df_orc["Grupo_ID"].where(
+        df_orc["Grupo_ID"].astype(str).str.strip() != "",
+        df_orc["Lanc_ID"]
+    )
 
     agg = (
         df_orc.groupby(["Orc_ID", "Ano", "Mês", "Mes_Num", "Projeto", "Categoria"], dropna=False)
@@ -870,7 +949,6 @@ def compute_consumo(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     df_real = df[df["Tipo"] == "Realizado"].copy()
 
     if df_orc.empty:
-        # Só realizados, sem orçados
         if not df_real.empty:
             grp = df_real.groupby(["Ano", "Mês", "Projeto", "Categoria"], dropna=False)["Valor_num"].sum().reset_index()
             for _, r in grp.iterrows():
@@ -889,14 +967,12 @@ def compute_consumo(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
 
     df_real["Orc_Vinc"] = df_real["Orcado_Vinculo"].astype(str).fillna("").str.strip()
 
-    # 1) consumo por vínculo
     vinc = df_real[df_real["Orc_Vinc"] != ""]
     consumo_vinc = (
         vinc.groupby("Orc_Vinc")["Valor_num"].sum().reset_index()
         .rename(columns={"Orc_Vinc": "Orc_ID", "Valor_num": "Realizado_Vinculado"})
     )
 
-    # 2) fallback por grupo (para realizados sem vínculo)
     sem_vinc = df_real[df_real["Orc_Vinc"] == ""]
     if not sem_vinc.empty:
         sem_vinc_grp = (
@@ -935,7 +1011,6 @@ def compute_consumo(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     else:
         df_orc2["Realizado_Fallback"] = 0.0
 
-    # garante Mes_Num no agregado (IMPORTANTE pro sort)
     if "Mes_Num" not in df_orc2.columns:
         df_orc2["Mes_Num"] = df_orc2["Mês"].apply(mes_num)
 
@@ -955,7 +1030,7 @@ def compute_consumo(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 9. TELAS
+# 10. TELAS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def tela_resumo(df: pd.DataFrame):
     st.markdown(
@@ -1025,7 +1100,10 @@ def tela_resumo(df: pd.DataFrame):
             .sum().reset_index()
             .sort_values("Orcado_Total", ascending=False)
         )
-        rows_html = "".join(render_progress_row(r["Projeto"], r["Realizado_Total"], r["Orcado_Total"]) for _, r in proj_agg.iterrows())
+        rows_html = "".join(
+            render_progress_row(r["Projeto"], r["Realizado_Total"], r["Orcado_Total"])
+            for _, r in proj_agg.iterrows()
+        )
         st.markdown(
             f'<div style="background:#FFFFFF;border:1px solid #F0F0F0;border-radius:14px;padding:6px 20px;box-shadow:0 1px 4px rgba(0,0,0,0.04);margin-bottom:20px;">{rows_html}</div>',
             unsafe_allow_html=True,
@@ -1040,7 +1118,10 @@ def tela_resumo(df: pd.DataFrame):
             .sum().reset_index()
             .sort_values("Orcado_Total", ascending=False)
         )
-        rows_html = "".join(render_progress_row(r["Categoria"], r["Realizado_Total"], r["Orcado_Total"]) for _, r in cat_agg.iterrows())
+        rows_html = "".join(
+            render_progress_row(r["Categoria"], r["Realizado_Total"], r["Orcado_Total"])
+            for _, r in cat_agg.iterrows()
+        )
         st.markdown(
             f'<div style="background:#FFFFFF;border:1px solid #F0F0F0;border-radius:14px;padding:6px 20px;box-shadow:0 1px 4px rgba(0,0,0,0.04);margin-bottom:20px;">{rows_html}</div>',
             unsafe_allow_html=True,
@@ -1237,9 +1318,7 @@ def tela_dados(df: pd.DataFrame):
 
     tabs = st.tabs(["📄 Lançamentos (linhas)", "📦 Orçamentos (agregado)"])
 
-    # ───────────────────────────────────────────────────────────────────────
     # TAB 1: LANÇAMENTOS
-    # ───────────────────────────────────────────────────────────────────────
     with tabs[0]:
         with st.form("form_filtros_dados"):
             render_section_title("Filtros de Pesquisa")
@@ -1343,9 +1422,7 @@ def tela_dados(df: pd.DataFrame):
                         st.success("Registros excluídos com sucesso!")
                         st.rerun()
 
-    # ───────────────────────────────────────────────────────────────────────
     # TAB 2: ORÇAMENTOS AGREGADOS
-    # ───────────────────────────────────────────────────────────────────────
     with tabs[1]:
         df_orc_agg, df_alertas = compute_consumo(df)
 
@@ -1394,8 +1471,7 @@ def tela_dados(df: pd.DataFrame):
             with st.expander(f"⚠️ Alertas ({len(df_alertas)})", expanded=False):
                 st.dataframe(df_alertas, use_container_width=True, hide_index=True)
 
-        # ✅ CORREÇÃO DO KEYERROR:
-        # Ordena usando view (que tem Mes_Num), depois seleciona colunas para exibir.
+        # ✅ Correção do KeyError:
         show_cols = ["Ano", "Mês", "Projeto", "Categoria", "Orcado_Total", "Realizado_Total", "Saldo", "Uso_%", "Status", "Orc_ID"]
         view_sorted = view.sort_values(["Ano", "Mes_Num", "Projeto", "Categoria"], ascending=[False, False, True, True])
         out = view_sorted[show_cols].copy()
@@ -1533,9 +1609,12 @@ def tela_cadastros(df_cad: pd.DataFrame, df_env: pd.DataFrame):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 10. MAIN / MENU
+# 11. MAIN / MENU
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def main():
+    # ✅ PRIMEIRO: senha (antes de carregar dados e desenhar o app)
+    gate_password_screen()
+
     if "pagina" not in st.session_state:
         st.session_state.pagina = "painel"
     if "cache_buster" not in st.session_state:
@@ -1552,7 +1631,7 @@ def main():
             🎯 Controle Orçamentário
           </div>
           <div style="font-size:13px; color:#8E8E93; margin-top:2px;">
-            Gestão Financeira · v6.1
+            Gestão Financeira · v6.2
           </div>
         </div>
         """,
@@ -1600,42 +1679,10 @@ def main():
 
         st.markdown("<hr>", unsafe_allow_html=True)
 
-        if not df_lancamentos.empty:
-            ano_atual = date.today().year
-            df_ano = df_lancamentos[df_lancamentos["Ano"] == ano_atual]
-            tot_orc = df_ano[df_ano["Tipo"] == "Orçado"]["Valor_num"].sum()
-            tot_real = df_ano[df_ano["Tipo"] == "Realizado"]["Valor_num"].sum()
-            uso_pct = pct(tot_real, tot_orc)
-
-            if uso_pct <= THRESH_WARN:
-                cor_sb = CORES["realizado"]
-            elif uso_pct <= THRESH_MAX:
-                cor_sb = CORES["aviso"]
-            else:
-                cor_sb = CORES["alerta"]
-
-            st.markdown(
-                f"""
-            <div style="background:#F5F5F5; border:1px solid #EBEBEB; border-radius:12px;
-                 padding:14px 16px; margin-bottom:16px;">
-              <div style="font-size:11px; font-weight:600; color:#8E8E93; text-transform:uppercase;
-                   letter-spacing:0.8px; margin-bottom:8px;">
-                {ano_atual} · Resumo
-              </div>
-              <div style="font-size:15px; font-weight:700; color:#1C1C1E;">{fmt_real(tot_real)}</div>
-              <div style="font-size:12px; color:#8E8E93; margin-top:2px;">
-                de {fmt_real(tot_orc)} orçados
-              </div>
-              <div style="background:#E5E5E5; border-radius:4px; height:5px; margin-top:10px; overflow:hidden;">
-                <div style="background:{cor_sb}; width:{min(uso_pct,100):.0f}%; height:5px; border-radius:4px;"></div>
-              </div>
-              <div style="font-size:11px; color:{cor_sb}; font-weight:600; margin-top:4px;">
-                {uso_pct:.0f}% consumido
-              </div>
-            </div>
-            """,
-                unsafe_allow_html=True,
-            )
+        # Logout
+        if st.button("🚪 Sair", use_container_width=True):
+            st.session_state.pop("auth_ok", None)
+            st.rerun()
 
         if st.button("🔄 Atualizar Dados", use_container_width=True):
             invalidate_cache()
